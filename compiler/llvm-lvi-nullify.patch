@@ -1,0 +1,826 @@
+diff --git a/clang/include/clang/Basic/CodeGenOptions.def b/clang/include/clang/Basic/CodeGenOptions.def
+index c7e01eb12..fd2ff8ee1 100644
+--- a/clang/include/clang/Basic/CodeGenOptions.def
++++ b/clang/include/clang/Basic/CodeGenOptions.def
+@@ -392,6 +392,9 @@ CODEGENOPT(KeepStaticConsts, 1, 0)
+ /// Whether to not follow the AAPCS that enforce at least one read before storing to a volatile bitfield
+ CODEGENOPT(ForceAAPCSBitfieldLoad, 1, 0)
+ 
++/// Mitigate LVI-NULL in switches
++CODEGENOPT(MitigateLVINull, 1, 0)
++
+ #undef CODEGENOPT
+ #undef ENUM_CODEGENOPT
+ #undef VALUE_CODEGENOPT
+diff --git a/clang/include/clang/Driver/Options.td b/clang/include/clang/Driver/Options.td
+index f818acb39..367d83bed 100644
+--- a/clang/include/clang/Driver/Options.td
++++ b/clang/include/clang/Driver/Options.td
+@@ -1247,6 +1247,9 @@ def fexperimental_isel : Flag<["-"], "fexperimental-isel">, Group<f_clang_Group>
+ def fexperimental_new_pass_manager : Flag<["-"], "fexperimental-new-pass-manager">,
+   Group<f_clang_Group>, Flags<[CC1Option]>,
+   HelpText<"Enables an experimental new pass manager in LLVM.">;
++def flvi_null : Flag<["-"], "flvi-null">,
++  Group<f_Group>, Flags<[DriverOption,CC1Option]>,
++  HelpText<"Mitigate LVI-NULL in switches.">;
+ def fexperimental_strict_floating_point : Flag<["-"], "fexperimental-strict-floating-point">,
+   Group<f_clang_Group>, Flags<[CC1Option]>,
+   HelpText<"Enables experimental strict floating point in LLVM.">;
+diff --git a/clang/lib/CodeGen/BackendUtil.cpp b/clang/lib/CodeGen/BackendUtil.cpp
+index dce094067..96f13ccf9 100644
+--- a/clang/lib/CodeGen/BackendUtil.cpp
++++ b/clang/lib/CodeGen/BackendUtil.cpp
+@@ -77,6 +77,7 @@
+ #include "llvm/Transforms/Utils.h"
+ #include "llvm/Transforms/Utils/CanonicalizeAliases.h"
+ #include "llvm/Transforms/Utils/EntryExitInstrumenter.h"
++#include "llvm/Transforms/Utils/LVIMitigation.h"
+ #include "llvm/Transforms/Utils/NameAnonGlobals.h"
+ #include "llvm/Transforms/Utils/SymbolRewriter.h"
+ #include "llvm/Transforms/Utils/UniqueInternalLinkageNames.h"
+@@ -1375,6 +1376,9 @@ void EmitAssemblyHelper::EmitAssemblyWithNewPassManager(
+       addCoroutinePassesAtO0(MPM, LangOpts, CodeGenOpts);
+       addSanitizersAtO0(MPM, TargetTriple, LangOpts, CodeGenOpts);
+     }
++
++    if (CodeGenOpts.MitigateLVINull)
++      MPM.addPass(LVIMitigationPass());
+   }
+ 
+   // FIXME: We still use the legacy pass manager to do code generation. We
+diff --git a/clang/lib/Driver/ToolChains/Clang.cpp b/clang/lib/Driver/ToolChains/Clang.cpp
+index f0a545132..a8b5f0ca0 100644
+--- a/clang/lib/Driver/ToolChains/Clang.cpp
++++ b/clang/lib/Driver/ToolChains/Clang.cpp
+@@ -5635,6 +5635,10 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
+   Args.AddLastArg(CmdArgs, options::OPT_fexperimental_new_pass_manager,
+                   options::OPT_fno_experimental_new_pass_manager);
+ 
++  // Enable mitigating lvi-null in switches and making some loads GS-relative
++  if (Args.hasArg(options::OPT_flvi_null))
++    CmdArgs.push_back("-flvi-null");
++
+   ObjCRuntime Runtime = AddObjCRuntimeArgs(Args, Inputs, CmdArgs, rewriteKind);
+   RenderObjCOptions(TC, D, RawTriple, Args, Runtime, rewriteKind != RK_None,
+                     Input, CmdArgs);
+diff --git a/clang/lib/Frontend/CompilerInvocation.cpp b/clang/lib/Frontend/CompilerInvocation.cpp
+index 73114c6d7..281dae1cf 100644
+--- a/clang/lib/Frontend/CompilerInvocation.cpp
++++ b/clang/lib/Frontend/CompilerInvocation.cpp
+@@ -805,6 +805,8 @@ static bool ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args, InputKind IK,
+   Opts.EmbedSource = Args.hasArg(OPT_gembed_source);
+   Opts.ForceDwarfFrameSection = Args.hasArg(OPT_fforce_dwarf_frame);
+ 
++  Opts.MitigateLVINull = Args.hasArg(OPT_flvi_null);
++
+   for (const auto &Arg : Args.getAllArgValues(OPT_fdebug_prefix_map_EQ)) {
+     auto Split = StringRef(Arg).split('=');
+     Opts.DebugPrefixMap.insert(
+diff --git a/llvm/include/llvm/Transforms/Utils/LVIMitigation.h b/llvm/include/llvm/Transforms/Utils/LVIMitigation.h
+new file mode 100644
+index 000000000..a286518e0
+--- /dev/null
++++ b/llvm/include/llvm/Transforms/Utils/LVIMitigation.h
+@@ -0,0 +1,29 @@
++//===- LVIMitigation.cpp - LVI-NULL Mitigation Pass ----------------------===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++//
++// This pass mtigates LVI-NULL in switches by adding fence in the zero or default
++// case.
++//
++//===----------------------------------------------------------------------===//
++
++#ifndef LLVM_TRANSFORMS_UTILS_LVIMITIGATION_H
++#define LLVM_TRANSFORMS_UTILS_LVIMITIGATION_H
++
++#include "llvm/IR/PassManager.h"
++
++namespace llvm {
++
++/// This pass is responsible for mitigating lvi-null in switches
++class LVIMitigationPass : public PassInfoMixin<LVIMitigationPass> {
++public:
++  PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
++  StringRef getPassName() const;
++};
++} // end namespace llvm
++
++#endif // LLVM_TRANSFORMS_UTILS_LVIMITIGATION_H
+diff --git a/llvm/lib/Passes/PassBuilder.cpp b/llvm/lib/Passes/PassBuilder.cpp
+index 4db7bebcb..b43adfd40 100644
+--- a/llvm/lib/Passes/PassBuilder.cpp
++++ b/llvm/lib/Passes/PassBuilder.cpp
+@@ -186,6 +186,7 @@
+ #include "llvm/Transforms/Utils/LibCallsShrinkWrap.h"
+ #include "llvm/Transforms/Utils/LoopSimplify.h"
+ #include "llvm/Transforms/Utils/LowerInvoke.h"
++#include "llvm/Transforms/Utils/LVIMitigation.h"
+ #include "llvm/Transforms/Utils/Mem2Reg.h"
+ #include "llvm/Transforms/Utils/NameAnonGlobals.h"
+ #include "llvm/Transforms/Utils/SymbolRewriter.h"
+diff --git a/llvm/lib/Target/X86/CMakeLists.txt b/llvm/lib/Target/X86/CMakeLists.txt
+index 729934b29..5bd561e85 100644
+--- a/llvm/lib/Target/X86/CMakeLists.txt
++++ b/llvm/lib/Target/X86/CMakeLists.txt
+@@ -74,6 +74,7 @@ set(sources
+   X86WinAllocaExpander.cpp
+   X86WinEHState.cpp
+   X86InsertWait.cpp
++  X86LVINullMitigation.cpp
+   )
+ 
+ add_llvm_target(X86CodeGen ${sources})
+diff --git a/llvm/lib/Target/X86/X86.h b/llvm/lib/Target/X86/X86.h
+index 91ba4e3d0..43bdb3a13 100644
+--- a/llvm/lib/Target/X86/X86.h
++++ b/llvm/lib/Target/X86/X86.h
+@@ -144,6 +144,7 @@ FunctionPass *createX86LoadValueInjectionLoadHardeningPass();
+ FunctionPass *createX86LoadValueInjectionRetHardeningPass();
+ FunctionPass *createX86SpeculativeLoadHardeningPass();
+ FunctionPass *createX86SpeculativeExecutionSideEffectSuppression();
++FunctionPass *createX86LoadValueInjectionNULLHardeningPass();
+ 
+ void initializeEvexToVexInstPassPass(PassRegistry &);
+ void initializeFixupBWInstPassPass(PassRegistry &);
+@@ -166,6 +167,7 @@ void initializeX86OptimizeLEAPassPass(PassRegistry &);
+ void initializeX86PartialReductionPass(PassRegistry &);
+ void initializeX86SpeculativeLoadHardeningPassPass(PassRegistry &);
+ void initializeX86SpeculativeExecutionSideEffectSuppressionPass(PassRegistry &);
++void initializeX86LoadValueInjectionNULLHardeningPassPass(PassRegistry &);
+ 
+ namespace X86AS {
+ enum : unsigned {
+diff --git a/llvm/lib/Target/X86/X86LVINullMitigation.cpp b/llvm/lib/Target/X86/X86LVINullMitigation.cpp
+new file mode 100644
+index 000000000..3b4c179b4
+--- /dev/null
++++ b/llvm/lib/Target/X86/X86LVINullMitigation.cpp
+@@ -0,0 +1,486 @@
++//===-- X86LoadValueInjectionNULLHardening.cpp - LVI NULL hardening for x86 --==//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++///
++/// Description: This pass is responsible for replacing instructions that perform
++/// implicit loads such as push, pop, ret, and different call instructions. First, it replaces
++/// every "call" instruction with the following sequence:
++/// ```
++/// lea 8(rip), <scratch-reg>
++/// sub 8, rsp
++/// mov <scratch-reg>, (rsp)
++/// jmp <call-target>
++/// ```
++/// Different call instructions, for instance PCrel calls or calls where the target
++/// is in memory are replaced with different code snippets.
++///
++/// Second, it replaces every `ret` instruction with the sequence:
++/// ```
++/// mov (rsp), <scratch-reg>
++/// jmp *<scratch-reg>
++/// ```
++/// where `<scratch-reg>` is some available scratch register, according to the
++/// calling convention of the function being mitigated.
++/// This is an adaption of Intels' LVI mitigation.
++///
++/// Third, it replaces all push sequences with the following:
++/// ```
++/// sub 0x8, rsp
++/// mov <target-reg>, 0x0(rsp)
++/// ```
++///
++/// Fourth: it replaces all pop sequences with the following:
++/// ```
++/// mov 0x0(rsp), <target-reg>
++/// add 0x8, rsp
++/// ```
++/// Finally, it takes care of loads that have not been made GS-relative in the frontend
++/// by changing the respective addressing.
++///
++//===----------------------------------------------------------------------===//
++
++#include "X86.h"
++#include "X86InstrBuilder.h"
++#include "X86Subtarget.h"
++#include "llvm/ADT/Statistic.h"
++#include "llvm/CodeGen/MachineBasicBlock.h"
++#include "llvm/CodeGen/MachineFunction.h"
++#include "llvm/CodeGen/MachineFunctionPass.h"
++#include "llvm/CodeGen/MachineInstrBuilder.h"
++#include "llvm/CodeGen/MachineOperand.h"
++#include "llvm/MC/MCCodeEmitter.h"
++#include "llvm/IR/Function.h"
++#include "llvm/Support/Debug.h"
++#include <bitset>
++
++using namespace llvm;
++
++#define PASS_KEY "lvi-null"
++#define DEBUG_TYPE PASS_KEY
++
++static cl::opt<bool> EnableLVINullMitigation(
++    "x86-enable-lvi-null", cl::NotHidden,
++    cl::desc("X86: Enable LVI-NULL mitigations in the backend."), cl::init(false));
++
++STATISTIC(NumCalls, "Number of calls modified for LVI-NULL mitigation");
++STATISTIC(NumPush, "Number of push instructions modified for LVI-NULL mitigation");
++STATISTIC(NumPop, "Number of pop instructions modified for LVI-NULL mitigation");
++STATISTIC(NumRet, "Number of ret instructions modified for LVI-NULL mitigation");
++STATISTIC(NumMemOps, "Number of memory operands modified for LVI-NULL mitigation");
++STATISTIC(NumFunctionsConsidered, "Number of functions analyzed");
++STATISTIC(NumFunctionsMitigated, "Number of functions for which mitigations were deployed");
++
++namespace {
++
++class X86LoadValueInjectionNULLHardeningPass : public MachineFunctionPass {
++public:
++  X86LoadValueInjectionNULLHardeningPass() : MachineFunctionPass(ID) {}
++  StringRef getPassName() const override {
++    return "X86 Load Value Injection (LVI) NULL-Hardening";
++  }
++  bool runOnMachineFunction(MachineFunction &MF) override;
++
++  static char ID;
++};
++
++} // end anonymous namespace
++
++char X86LoadValueInjectionNULLHardeningPass::ID = 0;
++
++// Helper function to add ModR/M references for [Seg: Reg + Offset] memory
++// accesses
++static const MachineInstrBuilder& addSegmentedMem(const MachineInstrBuilder &MIB, Register Seg, Register Reg, int Offset = 0) {
++  return MIB.addReg(Reg).addImm(1).addReg(0).addImm(Offset).addReg(Seg);
++}
++
++
++// Helper function to calculate the actual byte size of machine instructions
++// sadly the size inside the 'MachineInstruction' object is always zero
++//
++unsigned getInstructionByteSize(llvm::MCCodeEmitter *emitter, MachineFunction &MF, MachineBasicBlock::instr_iterator const &MI) {
++  // the vector into which we emit the code (no instruction should be larger then 64 byte)
++  SmallString<64> Code;
++
++  SmallVector<MCFixup, 4> Fixups;
++  raw_svector_ostream VecOS(Code);
++  
++  // convert MachineInstruction into MCInst (not complete but worksfor the instructions we consider)
++  MCInst inst;
++  inst.setOpcode(MI->getOpcode());
++
++  // convert operands
++  for (const MachineOperand &MO : MI->operands()) {
++    switch (MO.getType()) {
++      case MachineOperand::MO_Register:
++        if (!MO.isImplicit())
++          inst.addOperand(MCOperand::createReg(MO.getReg()));
++        break;
++
++      case MachineOperand::MO_Immediate:
++        inst.addOperand(MCOperand::createImm(MO.getImm()));
++        break;
++
++      default:
++        break;
++    }
++  }
++
++  // generate real machine code
++  emitter->encodeInstruction(inst, VecOS, Fixups, MF.getSubtarget<MCSubtargetInfo>());
++  // return the byte size of our vector
++  return Code.size();
++}
++
++
++bool eliminateRet(MachineBasicBlock &MBB, const X86InstrInfo *TII, const Register StackRegister, MachineBasicBlock::instr_iterator &MI) {
++  LLVM_DEBUG(dbgs() << "I'm eliminating ret instructions\n");
++
++  // we are executing a return so we use RCX as clobber
++
++  // copy the debug location for better dbg information
++  auto debug_location = MI->getDebugLoc();
++
++  // erase the instruction pointed by MI ... MI now points to the instruction after the one erased
++  MI = MBB.erase_instr(&(*MI));
++  
++  // first we move the return location into a clobber register
++  addSegmentedMem(BuildMI(MBB, MI, debug_location, TII->get(X86::MOV64rm), X86::RCX), X86::GS, StackRegister, 0);
++  
++  // we adjust the stack
++  BuildMI(MBB, MBB.end(), debug_location, TII->get(X86::ADD64ri8), StackRegister).addReg(StackRegister).addImm(8);
++    
++  // we jump to the location in the clobber register
++  BuildMI(MBB, MBB.end(), debug_location, TII->get(X86::JMP64r)).addReg(X86::RCX);
++  NumRet++;
++
++  // adjust the iterator
++  MI--;
++
++  return true;
++}
++
++bool eliminatePush(MachineBasicBlock &MBB, const X86InstrInfo *TII, const Register StackRegister, MachineBasicBlock::instr_iterator &MI) {
++  Register used_reg = MI->getOperand(0).getReg();
++
++  LLVM_DEBUG(dbgs() << "Push uses register: "<< MBB.getParent()->getSubtarget<X86Subtarget>().getRegisterInfo()->getRegAsmName(used_reg) << "\n");
++
++  // copy the debug location for better dbg information
++  auto debug_location = MI->getDebugLoc();
++
++  // erase the instruction pointed by MI ... MI now points to the instruction after the one erased
++  MI = MBB.erase_instr(&(*MI));
++  
++  // first, we adjust the stack
++  BuildMI(MBB, MI, debug_location, TII->get(X86::SUB64ri32), StackRegister).addReg(StackRegister).addImm(8);
++  
++  // then we save our used register on the stack
++  addSegmentedMem(BuildMI(MBB, MI, debug_location, TII->get(X86::MOV64mr)), X86::GS, StackRegister, 0).addReg(used_reg);
++  NumPush++;
++
++  // adjust the iterator
++  MI--;
++
++  return true;
++}
++
++bool eliminatePop(MachineBasicBlock &MBB, const X86InstrInfo *TII, const Register StackRegister, MachineBasicBlock::instr_iterator &MI) {
++  Register used_reg = MI->getOperand(0).getReg();
++  LLVM_DEBUG(dbgs() << "Pop uses register: "<< MBB.getParent()->getSubtarget<X86Subtarget>().getRegisterInfo()->getRegAsmName(used_reg) << "\n");
++  
++  // copy the debug location for better dbg information
++  auto debug_location = MI->getDebugLoc();
++
++  // erase the instruction pointed by MI ... MI now points to the instruction after the one erased
++  MI = MBB.erase_instr(&(*MI));
++
++  // first, we restore our value from the stack
++  addSegmentedMem(BuildMI(MBB, MI, debug_location, TII->get(X86::MOV64rm), used_reg), X86::GS, StackRegister, 0);
++
++  // then we adjust the stack
++  BuildMI(MBB, MI, debug_location, TII->get(X86::ADD64ri8), StackRegister).addReg(StackRegister).addImm(8);
++  NumPop++;
++
++  // adjust the iterator
++  MI--;
++
++  return true;
++}
++
++bool eliminateCallPCRel(llvm::MCCodeEmitter *emitter, MachineFunction &MF, MachineBasicBlock &MBB, const X86InstrInfo *TII, const Register StackRegister, MachineBasicBlock::instr_iterator &MI) {
++  LLVM_DEBUG(dbgs() << "I'm eliminating PCRel call instructions\n");
++
++  // we use R11 as clobber register
++
++  // copy the debug location for better dbg information
++  auto debug_location = MI->getDebugLoc();
++
++  // global adr of the call target
++  auto call_dest = MI->getOperand(0).getGlobal();
++  
++  // erase the instruction pointed by MI ... MI now points to the instruction after the one erased
++  MI = MBB.erase_instr(&(*MI));
++
++  // first, we load the rip and offset it by 8 to get our return address after the function
++  // we use r11 as clobber register since it is not part in the argument passing convention
++  // 0 is a placeholder
++  addRegOffset(BuildMI(MBB, MI, debug_location, TII->get(X86::LEA64r), X86::R11), X86::RIP, false, 0);
++
++  // then we adjust the stack
++  BuildMI(MBB, MI, debug_location, TII->get(X86::SUB64ri8), StackRegister).addReg(StackRegister).addImm(8);
++
++  // then we move the return address we got in the first step onto the stack
++  addSegmentedMem(BuildMI(MBB, MI, debug_location, TII->get(X86::MOV64mr)), X86::GS, StackRegister, 0).addReg(X86::R11);
++  
++  // finally, we can jump to our function instead of calling it
++  BuildMI(MBB, MI, debug_location, TII->get(X86::JMP_1)).addGlobalAddress(call_dest);
++  
++  // calculate the byte size of the instructions between the lea and the jump
++  unsigned size = getInstructionByteSize(emitter, MF, std::next(MI,-1))
++    + getInstructionByteSize(emitter, MF, std::next(MI,-2))
++    + getInstructionByteSize(emitter, MF, std::next(MI,-3));
++
++  // adjust the lea instruction offset
++  std::next(MI,-4)->getOperand(4).setImm(size);
++  NumCalls++;
++
++  // adjust the iterator
++  MI--;
++
++  return true;
++}
++
++bool eliminateCallRegister(llvm::MCCodeEmitter *emitter, MachineFunction &MF, MachineBasicBlock &MBB, const X86InstrInfo *TII, const Register StackRegister, MachineBasicBlock::instr_iterator &MI) {
++  LLVM_DEBUG(dbgs() << "I'm eliminating register call instructions\n");
++
++  // copy the debug location for better dbg information
++  auto debug_location = MI->getDebugLoc();
++
++  // register used in call
++  auto reg = MI->getOperand(0).getReg();
++
++  // erase the instruction pointed by MI ... MI now points to the instruction after the one erased
++  MI = MBB.erase_instr(&(*MI));
++
++  // we use R11 or RAX as clobber register
++  unsigned clobber_reg = reg != X86::R11 ? X86::R11 : X86::RAX;
++
++  // first, we load the rip and offset it by 8 to get our return address after the function
++  // 0 is a placeholder
++  addRegOffset(BuildMI(MBB, MI, debug_location, TII->get(X86::LEA64r), clobber_reg), X86::RIP, false, 0);
++
++  // then we adjust the stack
++  BuildMI(MBB, MI, debug_location, TII->get(X86::SUB64ri8), StackRegister).addReg(StackRegister).addImm(8);
++
++  // then we move the return address we got in the first step onto the stack
++  addSegmentedMem(BuildMI(MBB, MI, debug_location, TII->get(X86::MOV64mr)), X86::GS, StackRegister, 0).addReg(clobber_reg);
++  
++  // finally, we can jump to our function instead of calling it
++  BuildMI(MBB, MI, debug_location, TII->get(X86::JMP64r)).addReg(reg);
++
++  // calculate the byte size of the instructions between the lea and the jump
++  unsigned size = getInstructionByteSize(emitter, MF, std::next(MI,-1))
++    + getInstructionByteSize(emitter, MF, std::next(MI,-2))
++    + getInstructionByteSize(emitter, MF, std::next(MI,-3));
++
++  // adjust the lea instruction offset
++  std::next(MI,-4)->getOperand(4).setImm(size);
++  NumCalls++;
++
++  // adjust the iterator
++  MI--;
++
++  return true;
++}
++
++
++bool eliminateCallMemory(llvm::MCCodeEmitter *emitter, MachineFunction &MF, MachineBasicBlock &MBB, const X86InstrInfo *TII, const Register StackRegister, MachineBasicBlock::instr_iterator &MI) {
++  LLVM_DEBUG(dbgs() << "I'm eliminating memory call instructions\n");
++
++  // extract the memory operand
++  auto base         = MI->getOperand(X86::AddrBaseReg).getReg();
++  auto scale        = MI->getOperand(X86::AddrScaleAmt).getImm();
++  auto index        = MI->getOperand(X86::AddrIndexReg).getReg();
++  auto displacement = MI->getOperand(X86::AddrDisp).getImm();
++  auto segment      = MI->getOperand(X86::AddrSegmentReg).getReg();
++
++  // change the segment register here if not already gs
++  if (segment == X86::NoRegister) {
++    segment = X86::GS;
++  }
++
++  // we use R11, R10 or RAX as clobber register
++  unsigned clobber_reg;
++  // check if neither base nor index is the clobber register
++  if (base != X86::R11 && index != X86::R11) {
++    clobber_reg = X86::R11;
++  } else if (base != X86::RAX && index != X86::RAX) {
++    clobber_reg = X86::RAX;
++  } else {
++    clobber_reg = X86::R10;
++  }
++
++  // copy the debug location for better dbg information
++  auto debug_location = MI->getDebugLoc();
++
++  // erase the instruction pointed by MI ... MI now points to the instruction after the one erased
++  MI = MBB.erase_instr(&(*MI));
++
++  // first, we load the rip and offset it by 8 to get our return address after the function
++  // 0 is a placeholder
++  addRegOffset(BuildMI(MBB, MI, debug_location, TII->get(X86::LEA64r), clobber_reg), X86::RIP, false, 0);
++
++  // then we adjust the stack
++  BuildMI(MBB, MI, debug_location, TII->get(X86::SUB64ri8), StackRegister).addReg(StackRegister).addImm(8);
++
++  // then we move the return address we got in the first step onto the stack
++  addSegmentedMem(BuildMI(MBB, MI, debug_location, TII->get(X86::MOV64mr)), X86::GS, StackRegister, 0).addReg(clobber_reg);
++
++  // finally, we can jump to our function instead of calling it
++  BuildMI(MBB, MI, debug_location, TII->get(X86::JMP64m))
++    .addReg(base)         // at X86::AddrBaseReg
++    .addImm(scale)        // at X86::AddrScaleAmt
++    .addReg(index)        // at X86::AddrIndexReg
++    .addImm(displacement) // at X86::AddrDisp
++    .addReg(segment);     // at X86::AddrSegmentReg
++
++  // calculate the byte size of the instructions between the lea and the jump
++  unsigned size = getInstructionByteSize(emitter, MF, std::next(MI,-1))
++    + getInstructionByteSize(emitter, MF, std::next(MI,-2))
++    + getInstructionByteSize(emitter, MF, std::next(MI,-3));
++
++  // adjust the lea instruction offset
++  std::next(MI,-4)->getOperand(4).setImm(size);
++  NumCalls++;
++
++  // adjust the iterator
++  MI--;
++
++  return true;
++}
++
++
++bool mitigateLVI(const X86Subtarget *Subtarget, const Function &F, MachineFunction &MF) {
++  const X86RegisterInfo *TRI = Subtarget->getRegisterInfo();
++  const X86InstrInfo *TII = Subtarget->getInstrInfo();
++  const Register StackRegister = TRI->getStackRegister();
++
++  bool Modified = false;
++
++  // generate code emitter to determine the real size of instructions
++  auto CodeEmitter = createX86MCCodeEmitter(*TII, *TRI, MF.getContext());
++
++  // for each machine basic block
++  for (auto &MBB : MF) {
++    
++    if (MBB.empty())
++      continue;
++
++    // for each machine instruction
++    for(auto MI=MBB.instr_begin(); MI!=MBB.instr_end(); ++MI) {
++
++      // check the op code
++      switch(MI->getOpcode()) {
++        // RETURN
++        case X86::RETQ:
++          Modified |= eliminateRet(MBB, TII, StackRegister, MI);
++          break;
++
++        // PUSH
++        case X86::PUSH64r:
++        case X86::PUSH32r:
++          Modified |= eliminatePush(MBB, TII, StackRegister, MI);
++          break;
++
++        // POP
++        case X86::POP64r:
++        case X86::POP32r:
++          Modified |= eliminatePop(MBB, TII, StackRegister, MI);
++          break;
++
++        // CALLS
++        case X86::CALL64pcrel32:
++          Modified |= eliminateCallPCRel(CodeEmitter, MF, MBB, TII, StackRegister, MI);
++          break;
++        case X86::CALL64r:
++          Modified |= eliminateCallRegister(CodeEmitter, MF, MBB, TII, StackRegister, MI);
++          break;
++        case X86::CALL64m:
++          Modified |= eliminateCallMemory(CodeEmitter, MF, MBB, TII, StackRegister, MI);
++          break;
++
++        // Everything else which uses a memory operand
++        default: {
++          const MCInstrDesc &Desc = MI->getDesc();
++          
++          // check if the operation uses a memory operand
++          int mem_op_index = X86II::getMemoryOperandNo(Desc.TSFlags);
++          if (mem_op_index < 0) {
++            break;
++          }
++          // the index of the memory operand can have a offset
++          mem_op_index += X86II::getOperandBias(Desc);
++
++          // calculate the index of the segment register in the memory operand
++          unsigned segment_op_index = mem_op_index + X86::AddrSegmentReg;
++
++          // sanity check .. should not happen
++          if (segment_op_index >= MI->getNumOperands()) {
++            llvm::errs() << "Memory operand does not have allocated segment register!\n";
++            break;
++          }
++
++          // base and segment register
++          auto base    = MI->getOperand(mem_op_index + X86::AddrBaseReg).getReg(); 
++          auto segment = MI->getOperand(segment_op_index).getReg();
++
++          // only change segment register if the segment is not already set and the 
++          // memory operand does not use realtive addressing
++          if (base != X86::RIP && segment == X86::NoRegister) {
++            MI->getOperand(segment_op_index).ChangeToRegister(X86::GS, false);
++            Modified = true;
++          }
++
++          break;
++        }
++      } // end of switch
++    } // end of for each MO
++  } // end of for each MBB
++
++  delete CodeEmitter;
++
++  return Modified;
++}
++
++bool X86LoadValueInjectionNULLHardeningPass::runOnMachineFunction(
++    MachineFunction &MF) {
++  if(!EnableLVINullMitigation)
++    return false;
++  LLVM_DEBUG(dbgs() << "***** " << getPassName() << " : " << MF.getName()
++                    << " *****\n");
++  const X86Subtarget *Subtarget = &MF.getSubtarget<X86Subtarget>();
++  if (!Subtarget->is64Bit())
++    return false; // FIXME: support 32-bit
++
++  // Don't skip functions with the "optnone" attr but participate in opt-bisect.
++  const Function &F = MF.getFunction();
++  if (!F.hasOptNone() && skipFunction(F))
++    return false;
++  ++NumFunctionsConsidered;
++
++  bool Modified = mitigateLVI(Subtarget, F, MF);
++
++  if (Modified)
++    ++NumFunctionsMitigated;
++  return Modified;
++}
++
++INITIALIZE_PASS(X86LoadValueInjectionNULLHardeningPass, PASS_KEY,
++                "X86 LVI NULL hardener", false, false)
++
++FunctionPass *llvm::createX86LoadValueInjectionNULLHardeningPass() {
++  return new X86LoadValueInjectionNULLHardeningPass();
++}
+diff --git a/llvm/lib/Target/X86/X86TargetMachine.cpp b/llvm/lib/Target/X86/X86TargetMachine.cpp
+index 7344116e1..63cc55122 100644
+--- a/llvm/lib/Target/X86/X86TargetMachine.cpp
++++ b/llvm/lib/Target/X86/X86TargetMachine.cpp
+@@ -89,6 +89,7 @@ extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializeX86Target() {
+   initializeX86LoadValueInjectionRetHardeningPassPass(PR);
+   initializeX86OptimizeLEAPassPass(PR);
+   initializeX86PartialReductionPass(PR);
++  initializeX86LoadValueInjectionNULLHardeningPassPass(PR);
+ }
+ 
+ static std::unique_ptr<TargetLoweringObjectFile> createTLOF(const Triple &TT) {
+@@ -552,6 +553,8 @@ void X86PassConfig::addPreEmitPass2() {
+   if (TT.isOSWindows())
+     addPass(createCFGuardLongjmpPass());
+   addPass(createX86LoadValueInjectionRetHardeningPass());
++
++  addPass(createX86LoadValueInjectionNULLHardeningPass());
+ }
+ 
+ std::unique_ptr<CSEConfigBase> X86PassConfig::getCSEConfig() const {
+diff --git a/llvm/lib/Transforms/Utils/CMakeLists.txt b/llvm/lib/Transforms/Utils/CMakeLists.txt
+index 5c26767c1..043c6b552 100644
+--- a/llvm/lib/Transforms/Utils/CMakeLists.txt
++++ b/llvm/lib/Transforms/Utils/CMakeLists.txt
+@@ -46,6 +46,7 @@ add_llvm_component_library(LLVMTransformUtils
+   LowerInvoke.cpp
+   LowerMemIntrinsics.cpp
+   LowerSwitch.cpp
++  LVIMitigation.cpp
+   Mem2Reg.cpp
+   MetaRenamer.cpp
+   MisExpect.cpp
+diff --git a/llvm/lib/Transforms/Utils/LVIMitigation.cpp b/llvm/lib/Transforms/Utils/LVIMitigation.cpp
+new file mode 100644
+index 000000000..599cc6f43
+--- /dev/null
++++ b/llvm/lib/Transforms/Utils/LVIMitigation.cpp
+@@ -0,0 +1,138 @@
++//===- LVIMitigation.cpp - LVI-NULL Mitigation Pass ----------------------===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++//
++// This pass first mtigates LVI-NULL in switches by adding a fence in the zero or default
++// case.
++//
++// In a second step it makes all LoadInst and all GlobalVariables relative to the GS segment.
++//
++//===----------------------------------------------------------------------===//
++
++#include "llvm/Transforms/Utils/LVIMitigation.h"
++#include "llvm/IR/Constants.h"
++#include "llvm/IR/Function.h"
++#include "llvm/IR/Instructions.h"
++#include "llvm/IR/IntrinsicInst.h"
++#include "llvm/IR/Constants.h"
++#include "llvm/IR/LLVMContext.h"
++#include "llvm/IR/Module.h"
++#include "llvm/IR/Type.h"
++#include "llvm/InitializePasses.h"
++#include "llvm/Support/Debug.h"
++#include "llvm/Support/raw_ostream.h"
++#include "llvm/Transforms/Utils.h"
++#include "llvm/Transforms/Utils/BasicBlockUtils.h"
++#include "llvm/IR/IRBuilder.h"
++#include "llvm/ADT/Statistic.h"
++
++using namespace llvm;
++
++#define DEBUG_TYPE "lvi-null-ir"
++
++STATISTIC(NumSwitchesConsidered, "Number of switches considered modified for LVI-NULL mitigation");
++STATISTIC(NumSwitchesModified, "Number of switches modified modified for LVI-NULL mitigation");
++STATISTIC(NumZero, "Number of zero cases modified for LVI-NULL mitigation");
++STATISTIC(NumDefault, "Number of default cases modified for LVI-NULL mitigation");
++STATISTIC(NumLoadsModified, "Number of loads modified for LVI-NULL mitigation");
++STATISTIC(NumStoresModified, "Number of store modified for LVI-NULL mitigation");
++STATISTIC(NumGlobalsModified, "Number of globals modified for LVI-NULL mitigation");
++
++StringRef LVIMitigationPass::getPassName() const {
++    return "LVI-NULL mitigation pass";
++}
++
++static bool mitigateLVINullInSwitch(SwitchInst *SI) {
++  IRBuilder<> Builder(&*(SI->getParent()));
++
++  // Iterate over all cases to check if the switch has a case for the value 0
++  bool contains_zero_case = false;
++  int zero_case_index;
++  for(auto _case : SI->cases()) {
++    if(_case.getCaseValue()->getZExtValue() == 0) {
++      zero_case_index = _case.getCaseIndex();
++      contains_zero_case = true;
++      break;
++    }
++  }
++
++  if(contains_zero_case) {
++    BasicBlock *zero_case = SI->getSuccessor(zero_case_index+1);
++    if(isa<FenceInst>(*zero_case->getFirstInsertionPt()))
++      return false;
++
++    new FenceInst(Builder.getContext(), AtomicOrdering::SequentiallyConsistent, SyncScope::System, &*(zero_case->getFirstInsertionPt()));
++    NumZero++;
++    return true;
++  } else {
++    // we get the default case of the switch, if one exists this is simply its basic block, if none exists than it is the basic block that gets executed after the switch
++    BasicBlock *default_case = SI->getDefaultDest();
++    if(isa<FenceInst>(*default_case->getFirstInsertionPt()))
++      return false;
++
++    // we create a new zero case basic block
++    BasicBlock *zero_case = BasicBlock::Create(Builder.getContext(), "lvi", SI->getFunction());
++    // we add our fence instruction to our newly created basic block as its first instruction
++    FenceInst *fence = new FenceInst(Builder.getContext(), AtomicOrdering::SequentiallyConsistent, SyncScope::System, &*(zero_case->getFirstInsertionPt()));
++    // we now create an unconditional branch to the default case
++    BranchInst *branch = BranchInst::Create(default_case, zero_case);
++    // finally, we add the zero case to the branch
++    SI->addCase(Builder.getInt32(0), zero_case);
++    return true;
++  }
++  return false;
++}
++
++static bool mitigateLVINull(Module &M) {
++  bool Modified = false;
++  for(Function &F : M) {
++    for (BasicBlock &BB : F) {
++      for (Instruction &I : BB) {
++        if(auto SI = dyn_cast<SwitchInst>(&I)) {
++          NumSwitchesConsidered++;
++          if(mitigateLVINullInSwitch(SI)) {
++            Modified = true;
++            NumSwitchesModified++;
++          }
++        }
++
++        // make all loads GS-relative if not already
++        if(auto LI = dyn_cast<LoadInst>(&I)) {
++          auto type = LI->getPointerOperandType();
++          auto operand = LI->getPointerOperand();
++          if(dyn_cast<GlobalVariable>(operand))
++            continue;
++          if(type) {
++            auto new_type = dyn_cast<PointerType>(type)->getElementType()->getPointerTo(256);
++            LI->getPointerOperand()->mutateType(new_type);
++            Modified = true;
++            NumLoadsModified++;
++          }
++        }
++      }
++    }
++  }
++
++  // make all global variables GS-realtive
++  for(auto &global : M.getGlobalList()) {
++    auto new_type = global.getType()->getPointerTo(256);
++    global.mutateType(new_type);
++    Modified = true;
++    NumGlobalsModified++;
++  }
++  return Modified;
++}
++
++PreservedAnalyses LVIMitigationPass::run(Module &M,
++                                        ModuleAnalysisManager &AM) {
++  LLVM_DEBUG(dbgs() << "***** " << getPassName() << " : " << M.getName()
++                    << " *****\n");
++  if(mitigateLVINull(M))
++    return PreservedAnalyses::none();
++  else
++    return PreservedAnalyses::all();
++}

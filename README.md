@@ -43,3 +43,9 @@ As last step build install the patched SDK from `sgx-sdk/linux-sgx`, following t
 
 # Example Enclave
 We provide a minimal example inside the `example` folder.
+
+
+# Warnings
+**Warning #1**: We are providing this code as-is. You are responsible for protecting yourself, your property and data, and others from any risks caused by this code. This code may cause unexpected and undesirable behavior to occur on your machine.
+
+**Warning #2**: This code is only for testing purposes. Do not run it on any productive systems. Do not run it on any system that might be used by another person or entity.

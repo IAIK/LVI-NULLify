@@ -1,0 +1,3 @@
+#!/bin/bash
+DIR=`dirname "$0"`
+$DIR/llvm11/build/bin/clang++ -flvi-null -mllvm -x86-enable-lvi-null -mcmodel=large $@ -fno-pic

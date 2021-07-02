@@ -15,7 +15,7 @@ make
 inside the `relocator` folder.
 
 # SGX SDK/PSW
-We advice to completely remove all SDK and PSW installations from the system before starting the installation.
+We advise to completely remove all SDK and PSW installations from the system before starting the installation.
 
 ## Install unpatched SDK
 First run:
@@ -27,8 +27,10 @@ inside the `sgx-sdk` folder.
 Then follow the Intel documentation on how to install only the SDK from the `sgx-sdk/linux-sgx` directory.
 And source the resulting environment.
 
+This step creates an unpatched SDK that is necessary for PSW installation.
+
 ## Install patched PSW
-Then clean the complete repository. We advice to delete the repository and redo the checkout process again.
+Then clean the complete repository. We advise to delete the repository and redo the checkout process again.
 
 Afterwards apply the patch:
 ```
@@ -36,7 +38,7 @@ Afterwards apply the patch:
 ```
 inside the `sgx-sdk` folder.
 
-Again follow the Intel documentation on how to install the PSW from the `sgx-sdk/linux-sgx` directory.
+Now follow the Intel documentation on how to install the PSW from the `sgx-sdk/linux-sgx` directory.
 
 ## Install patched SDK
 As last step build install the patched SDK from `sgx-sdk/linux-sgx`, following the Intel documentation. 
@@ -48,4 +50,4 @@ We provide a minimal example inside the `example` folder.
 # Warnings
 **Warning #1**: We are providing this code as-is. You are responsible for protecting yourself, your property and data, and others from any risks caused by this code. This code may cause unexpected and undesirable behavior to occur on your machine.
 
-**Warning #2**: This code is only for testing purposes. Do not run it on any productive systems. Do not run it on any system that might be used by another person or entity.
+**Warning #2**: This code is only for testing purposes. Do not run it on any production systems. Do not run it on any system that might be used by another person or entity.

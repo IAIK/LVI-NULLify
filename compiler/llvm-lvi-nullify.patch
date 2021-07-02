@@ -157,10 +157,10 @@ index 91ba4e3d0..43bdb3a13 100644
  enum : unsigned {
 diff --git a/llvm/lib/Target/X86/X86LVINullMitigation.cpp b/llvm/lib/Target/X86/X86LVINullMitigation.cpp
 new file mode 100644
-index 000000000..3b4c179b4
+index 000000000..a6e27500f
 --- /dev/null
 +++ b/llvm/lib/Target/X86/X86LVINullMitigation.cpp
-@@ -0,0 +1,486 @@
+@@ -0,0 +1,833 @@
 +//===-- X86LoadValueInjectionNULLHardening.cpp - LVI NULL hardening for x86 --==//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -225,6 +225,21 @@ index 000000000..3b4c179b4
 +#define PASS_KEY "lvi-null"
 +#define DEBUG_TYPE PASS_KEY
 +
++#define MIB_ADD_MEM_SYMBOL(_symbol)            \
++    addReg(X86::RIP)                /*base*/   \
++        .addImm(1)                  /*scale*/  \
++        .addReg(X86::NoRegister)    /*index*/  \
++        .addExternalSymbol(_symbol) /*symbol*/ \
++        .addReg(X86::NoRegister)    /*segment*/
++
++#define MIB_ADD_MBB_ADDRESS(_mbb)              \
++    addReg(X86::RIP)                /*base*/   \
++        .addImm(1)                  /*scale*/  \
++        .addReg(X86::NoRegister)    /*index*/  \
++        .addMBB(_mbb)               /*symbol*/ \
++        .addReg(X86::NoRegister)    /*segment*/
++
++
 +static cl::opt<bool> EnableLVINullMitigation(
 +    "x86-enable-lvi-null", cl::NotHidden,
 +    cl::desc("X86: Enable LVI-NULL mitigations in the backend."), cl::init(false));
@@ -260,46 +275,70 @@ index 000000000..3b4c179b4
 +  return MIB.addReg(Reg).addImm(1).addReg(0).addImm(Offset).addReg(Seg);
 +}
 +
++// check if the EFLAGS register is used 
++static bool checkEFLAGSLive(MachineInstr *MI) {
++  if (MI->killsRegister(X86::EFLAGS))
++    return false;
 +
-+// Helper function to calculate the actual byte size of machine instructions
-+// sadly the size inside the 'MachineInstruction' object is always zero
-+//
-+unsigned getInstructionByteSize(llvm::MCCodeEmitter *emitter, MachineFunction &MF, MachineBasicBlock::instr_iterator const &MI) {
-+  // the vector into which we emit the code (no instruction should be larger then 64 byte)
-+  SmallString<64> Code;
++  // The EFLAGS operand of MI might be missing a kill marker.
++  // Figure out whether EFLAGS operand should LIVE after MI instruction.
++  MachineBasicBlock *BB = MI->getParent();
++  MachineBasicBlock::iterator ItrMI = MI;
 +
-+  SmallVector<MCFixup, 4> Fixups;
-+  raw_svector_ostream VecOS(Code);
-+  
-+  // convert MachineInstruction into MCInst (not complete but worksfor the instructions we consider)
-+  MCInst inst;
-+  inst.setOpcode(MI->getOpcode());
-+
-+  // convert operands
-+  for (const MachineOperand &MO : MI->operands()) {
-+    switch (MO.getType()) {
-+      case MachineOperand::MO_Register:
-+        if (!MO.isImplicit())
-+          inst.addOperand(MCOperand::createReg(MO.getReg()));
-+        break;
-+
-+      case MachineOperand::MO_Immediate:
-+        inst.addOperand(MCOperand::createImm(MO.getImm()));
-+        break;
-+
-+      default:
-+        break;
-+    }
++  // Scan forward through BB for a use/def of EFLAGS.
++  for (auto I = std::next(ItrMI), E = BB->end(); I != E; ++I) {
++    if (I->readsRegister(X86::EFLAGS))
++      return true;
++    if (I->definesRegister(X86::EFLAGS))
++      return false;
 +  }
 +
-+  // generate real machine code
-+  emitter->encodeInstruction(inst, VecOS, Fixups, MF.getSubtarget<MCSubtargetInfo>());
-+  // return the byte size of our vector
-+  return Code.size();
++  // We hit the end of the block, check whether EFLAGS is live into a successor.
++  for (auto I = BB->succ_begin(), E = BB->succ_end(); I != E; ++I) {
++    if ((*I)->isLiveIn(X86::EFLAGS))
++      return true;
++  }
++
++  return false;
++}
++
++// split a basic block into two, this is needed for jumps and leas to determine instruction addresses
++MachineBasicBlock* sliceMBBAt(MachineBasicBlock::iterator MI) {
++    MachineBasicBlock *       MBB = MI->getParent();
++    MachineFunction *         MF  = MBB->getParent();
++    MachineFunction::iterator MFI = ++(MBB->getIterator());
++
++    MachineBasicBlock *sinkMBB = MF->CreateMachineBasicBlock(MBB->getBasicBlock());
++
++    MF->insert(MFI, sinkMBB);
++
++    sinkMBB->splice(sinkMBB->begin(), MBB, std::next(MI), MBB->end());
++    sinkMBB->transferSuccessorsAndUpdatePHIs(MBB);
++    sinkMBB->setHasAddressTaken();
++    sinkMBB->setLabelMustBeEmitted();
++
++    // If the EFLAGS register isn't dead in the terminator, then claim that it's
++    // live into the sink and copy blocks.
++    // this is freaking important otherwise some labels are optimized out and we get the
++    // weirdest backend errors
++    if (checkEFLAGSLive(&*MI)) {
++      sinkMBB->addLiveIn(X86::EFLAGS);
++    }
++
++    MBB->addSuccessor(sinkMBB);
++
++    return sinkMBB;
 +}
 +
 +
-+bool eliminateRet(MachineBasicBlock &MBB, const X86InstrInfo *TII, const Register StackRegister, MachineBasicBlock::instr_iterator &MI) {
++/* convert:
++  ret
++  ---
++  mov %gs:(%rsp), %rcx
++  add $8, %rsp
++  jmp *%rcx
++*/
++bool eliminateRet(MachineBasicBlock &MBB, const X86InstrInfo *TII, MachineBasicBlock::iterator &MI) {
 +  LLVM_DEBUG(dbgs() << "I'm eliminating ret instructions\n");
 +
 +  // we are executing a return so we use RCX as clobber
@@ -309,15 +348,19 @@ index 000000000..3b4c179b4
 +
 +  // erase the instruction pointed by MI ... MI now points to the instruction after the one erased
 +  MI = MBB.erase_instr(&(*MI));
-+  
++
 +  // first we move the return location into a clobber register
-+  addSegmentedMem(BuildMI(MBB, MI, debug_location, TII->get(X86::MOV64rm), X86::RCX), X86::GS, StackRegister, 0);
++  addSegmentedMem(BuildMI(MBB, MI, debug_location, TII->get(X86::MOV64rm), X86::RCX), X86::GS, X86::RSP, 0);
 +  
 +  // we adjust the stack
-+  BuildMI(MBB, MBB.end(), debug_location, TII->get(X86::ADD64ri8), StackRegister).addReg(StackRegister).addImm(8);
-+    
++  BuildMI(MBB, MBB.end(), debug_location, TII->get(X86::ADD64ri8), X86::RSP)
++    .addReg(X86::RSP)
++    .addImm(8);
++
 +  // we jump to the location in the clobber register
-+  BuildMI(MBB, MBB.end(), debug_location, TII->get(X86::JMP64r)).addReg(X86::RCX);
++  BuildMI(MBB, MBB.end(), debug_location, TII->get(X86::JMP64r))
++    .addReg(X86::RCX);
++
 +  NumRet++;
 +
 +  // adjust the iterator
@@ -326,7 +369,13 @@ index 000000000..3b4c179b4
 +  return true;
 +}
 +
-+bool eliminatePush(MachineBasicBlock &MBB, const X86InstrInfo *TII, const Register StackRegister, MachineBasicBlock::instr_iterator &MI) {
++/* convert:
++  push %reg
++  ---
++  sub $8, %rsp
++  mov %reg, %gs:0(%rsp)
++*/
++bool eliminatePushRegister(MachineBasicBlock &MBB, const X86InstrInfo *TII, MachineBasicBlock::iterator &MI) {
 +  Register used_reg = MI->getOperand(0).getReg();
 +
 +  LLVM_DEBUG(dbgs() << "Push uses register: "<< MBB.getParent()->getSubtarget<X86Subtarget>().getRegisterInfo()->getRegAsmName(used_reg) << "\n");
@@ -338,10 +387,11 @@ index 000000000..3b4c179b4
 +  MI = MBB.erase_instr(&(*MI));
 +  
 +  // first, we adjust the stack
-+  BuildMI(MBB, MI, debug_location, TII->get(X86::SUB64ri32), StackRegister).addReg(StackRegister).addImm(8);
++  BuildMI(MBB, MI, debug_location, TII->get(X86::SUB64ri32), X86::RSP).addReg(X86::RSP).addImm(8);
 +  
 +  // then we save our used register on the stack
-+  addSegmentedMem(BuildMI(MBB, MI, debug_location, TII->get(X86::MOV64mr)), X86::GS, StackRegister, 0).addReg(used_reg);
++  addSegmentedMem(BuildMI(MBB, MI, debug_location, TII->get(X86::MOV64mr)), X86::GS, X86::RSP, 0).addReg(used_reg);
++
 +  NumPush++;
 +
 +  // adjust the iterator
@@ -350,7 +400,81 @@ index 000000000..3b4c179b4
 +  return true;
 +}
 +
-+bool eliminatePop(MachineBasicBlock &MBB, const X86InstrInfo *TII, const Register StackRegister, MachineBasicBlock::instr_iterator &MI) {
++/* convert:
++  push "mem"
++  ---
++  mov %rax, %gs:-8(%rsp)
++  mov "mem", %rax
++  xchg %rax, %gs:-8(%rsp)
++  sub $8, %rsp             // do not subtract befire reading the mem op (mem op can be on the stack!)
++*/
++bool eliminatePushMemory(MachineBasicBlock &MBB, const X86InstrInfo *TII, MachineBasicBlock::iterator &MI) {
++
++  // extract the memory operand
++  auto base         = MI->getOperand(X86::AddrBaseReg).getReg();
++  auto scale        = MI->getOperand(X86::AddrScaleAmt).getImm();
++  auto index        = MI->getOperand(X86::AddrIndexReg).getReg();
++  auto displacement = MI->getOperand(X86::AddrDisp);
++  auto segment      = MI->getOperand(X86::AddrSegmentReg).getReg();
++
++  // change the segment register here if not already gs
++  if (segment == X86::NoRegister) {
++    segment = X86::GS;
++  }
++  if (segment == X86::GS && base == X86::RIP) {
++    base = X86::NoRegister;
++  }
++
++  // copy the debug location for better dbg information
++  auto debug_location = MI->getDebugLoc();
++
++  // erase the instruction pointed by MI ... MI now points to the instruction after the one erased
++  MI = MBB.erase_instr(&(*MI));
++  
++  Register used_reg = X86::RAX;
++
++  // save clobber register!
++  addSegmentedMem(BuildMI(MBB, MI, debug_location, TII->get(X86::MOV64mr)), X86::GS, X86::RSP, -8)
++    .addReg(used_reg);
++
++  // store memory operand inside clobber register
++  BuildMI(MBB, MI, debug_location, TII->get(X86::MOV64rm))
++    .addReg(used_reg)
++    .addReg(base)         // at X86::AddrBaseReg
++    .addImm(scale)        // at X86::AddrScaleAmt
++    .addReg(index)        // at X86::AddrIndexReg
++    .add(displacement) // at X86::AddrDisp
++    .addReg(segment);     // at X86::AddrSegmentReg
++
++  // swap clobber register with memory operand
++  BuildMI(MBB, MI, debug_location, TII->get(X86::XCHG64rm))
++    .addReg(used_reg)
++    .addReg(used_reg)
++    .addReg(X86::RSP)
++    .addImm(1)
++    .addReg(X86::NoRegister)
++    .addImm(-8)
++    .addReg(X86::GS);
++
++  // dont move the sub ... the memory operand can be itself on the stack and that would change the stack!
++  // fadjust the stack
++  BuildMI(MBB, MI, debug_location, TII->get(X86::SUB64ri32), X86::RSP).addReg(X86::RSP).addImm(8);
++
++  NumPush++;
++
++  // adjust the iterator
++  MI--;
++
++  return true;
++}
++
++/* convert:
++  pop %reg
++  ---
++  mov %gs:0(%rsp), %reg
++  add $8, %rsp
++*/
++bool eliminatePop(MachineBasicBlock &MBB, const X86InstrInfo *TII, MachineBasicBlock::iterator &MI) {
 +  Register used_reg = MI->getOperand(0).getReg();
 +  LLVM_DEBUG(dbgs() << "Pop uses register: "<< MBB.getParent()->getSubtarget<X86Subtarget>().getRegisterInfo()->getRegAsmName(used_reg) << "\n");
 +  
@@ -361,10 +485,10 @@ index 000000000..3b4c179b4
 +  MI = MBB.erase_instr(&(*MI));
 +
 +  // first, we restore our value from the stack
-+  addSegmentedMem(BuildMI(MBB, MI, debug_location, TII->get(X86::MOV64rm), used_reg), X86::GS, StackRegister, 0);
++  addSegmentedMem(BuildMI(MBB, MI, debug_location, TII->get(X86::MOV64rm), used_reg), X86::GS, X86::RSP, 0);
 +
 +  // then we adjust the stack
-+  BuildMI(MBB, MI, debug_location, TII->get(X86::ADD64ri8), StackRegister).addReg(StackRegister).addImm(8);
++  BuildMI(MBB, MI, debug_location, TII->get(X86::ADD64ri8), X86::RSP).addReg(X86::RSP).addImm(8);
 +  NumPop++;
 +
 +  // adjust the iterator
@@ -373,41 +497,43 @@ index 000000000..3b4c179b4
 +  return true;
 +}
 +
-+bool eliminateCallPCRel(llvm::MCCodeEmitter *emitter, MachineFunction &MF, MachineBasicBlock &MBB, const X86InstrInfo *TII, const Register StackRegister, MachineBasicBlock::instr_iterator &MI) {
++/* convert:
++  call symbol_like
++  ---
++  lea 1f(%rip), %r11
++  sub $8, %rsp
++  mob %r11, %gs:0(%rsp)
++  jmp symbol_like
++1:
++*/
++bool eliminateCallPCRel(MachineBasicBlock &MBB, const X86InstrInfo *TII, MachineBasicBlock::iterator &MI) {
 +  LLVM_DEBUG(dbgs() << "I'm eliminating PCRel call instructions\n");
-+
-+  // we use R11 as clobber register
 +
 +  // copy the debug location for better dbg information
 +  auto debug_location = MI->getDebugLoc();
 +
-+  // global adr of the call target
-+  auto call_dest = MI->getOperand(0).getGlobal();
++  // the call target
++  // please dear "insert god figure" make this thing outlive the MI we erase later! 
++  MachineOperand call_dest = MI->getOperand(0);
 +  
-+  // erase the instruction pointed by MI ... MI now points to the instruction after the one erased
-+  MI = MBB.erase_instr(&(*MI));
++  // slice the MBB so we don't need to calculate the lea offset by hand
++  MachineBasicBlock *sinkMBB = sliceMBBAt(MI);
 +
-+  // first, we load the rip and offset it by 8 to get our return address after the function
-+  // we use r11 as clobber register since it is not part in the argument passing convention
-+  // 0 is a placeholder
-+  addRegOffset(BuildMI(MBB, MI, debug_location, TII->get(X86::LEA64r), X86::R11), X86::RIP, false, 0);
++  // first, we load the rip and off the block after
++  BuildMI(MBB, MI, debug_location, TII->get(X86::LEA64r), X86::R11).MIB_ADD_MBB_ADDRESS(sinkMBB);
 +
 +  // then we adjust the stack
-+  BuildMI(MBB, MI, debug_location, TII->get(X86::SUB64ri8), StackRegister).addReg(StackRegister).addImm(8);
++  BuildMI(MBB, MI, debug_location, TII->get(X86::SUB64ri8), X86::RSP).addReg(X86::RSP).addImm(8);
 +
 +  // then we move the return address we got in the first step onto the stack
-+  addSegmentedMem(BuildMI(MBB, MI, debug_location, TII->get(X86::MOV64mr)), X86::GS, StackRegister, 0).addReg(X86::R11);
-+  
-+  // finally, we can jump to our function instead of calling it
-+  BuildMI(MBB, MI, debug_location, TII->get(X86::JMP_1)).addGlobalAddress(call_dest);
-+  
-+  // calculate the byte size of the instructions between the lea and the jump
-+  unsigned size = getInstructionByteSize(emitter, MF, std::next(MI,-1))
-+    + getInstructionByteSize(emitter, MF, std::next(MI,-2))
-+    + getInstructionByteSize(emitter, MF, std::next(MI,-3));
++  addSegmentedMem(BuildMI(MBB, MI, debug_location, TII->get(X86::MOV64mr)), X86::GS, X86::RSP, 0).addReg(X86::R11);
 +
-+  // adjust the lea instruction offset
-+  std::next(MI,-4)->getOperand(4).setImm(size);
++  // finally, we can jump to our function instead of calling it
++  BuildMI(MBB, MI, debug_location, TII->get(X86::JMP_1)).add(call_dest);
++
++  // erase the instruction pointed by MI ... MI now points to the instruction after the one erased
++  MI = MBB.erase_instr(&(*MI));
++    
 +  NumCalls++;
 +
 +  // adjust the iterator
@@ -416,7 +542,18 @@ index 000000000..3b4c179b4
 +  return true;
 +}
 +
-+bool eliminateCallRegister(llvm::MCCodeEmitter *emitter, MachineFunction &MF, MachineBasicBlock &MBB, const X86InstrInfo *TII, const Register StackRegister, MachineBasicBlock::instr_iterator &MI) {
++/* convert:
++  call *%reg
++  ---
++  lea __ImageBase(%rip), %clobber
++  add %clobber, %reg
++  lea 1f(%rip), %clobber
++  sub $8, %rsp
++  mob %clobber, %gs:0(%rsp)
++  jmp %reg
++1:
++*/
++bool eliminateCallRegister(MachineBasicBlock &MBB, const X86InstrInfo *TII, MachineBasicBlock::iterator &MI) {
 +  LLVM_DEBUG(dbgs() << "I'm eliminating register call instructions\n");
 +
 +  // copy the debug location for better dbg information
@@ -425,33 +562,32 @@ index 000000000..3b4c179b4
 +  // register used in call
 +  auto reg = MI->getOperand(0).getReg();
 +
-+  // erase the instruction pointed by MI ... MI now points to the instruction after the one erased
-+  MI = MBB.erase_instr(&(*MI));
-+
 +  // we use R11 or RAX as clobber register
 +  unsigned clobber_reg = reg != X86::R11 ? X86::R11 : X86::RAX;
 +
-+  // first, we load the rip and offset it by 8 to get our return address after the function
-+  // 0 is a placeholder
-+  addRegOffset(BuildMI(MBB, MI, debug_location, TII->get(X86::LEA64r), clobber_reg), X86::RIP, false, 0);
++  // convert address
++  BuildMI(MBB, MI, debug_location, TII->get(X86::LEA64r), clobber_reg).MIB_ADD_MEM_SYMBOL("__ImageBase");
++  BuildMI(MBB, MI, debug_location, TII->get(X86::ADD64rr), reg).addReg(reg).addReg(clobber_reg);
++
++  // slice the MBB so we don't need to calculate the lea offset by hand
++  MachineBasicBlock *sinkMBB = sliceMBBAt(MI);
++
++  // first, we load the rip and off the block after
++  BuildMI(MBB, MI, debug_location, TII->get(X86::LEA64r), clobber_reg).MIB_ADD_MBB_ADDRESS(sinkMBB);
 +
 +  // then we adjust the stack
-+  BuildMI(MBB, MI, debug_location, TII->get(X86::SUB64ri8), StackRegister).addReg(StackRegister).addImm(8);
++  BuildMI(MBB, MI, debug_location, TII->get(X86::SUB64ri8), X86::RSP).addReg(X86::RSP).addImm(8);
 +
 +  // then we move the return address we got in the first step onto the stack
-+  addSegmentedMem(BuildMI(MBB, MI, debug_location, TII->get(X86::MOV64mr)), X86::GS, StackRegister, 0).addReg(clobber_reg);
++  addSegmentedMem(BuildMI(MBB, MI, debug_location, TII->get(X86::MOV64mr)), X86::GS, X86::RSP, 0).addReg(clobber_reg);
 +  
 +  // finally, we can jump to our function instead of calling it
 +  BuildMI(MBB, MI, debug_location, TII->get(X86::JMP64r)).addReg(reg);
 +
-+  // calculate the byte size of the instructions between the lea and the jump
-+  unsigned size = getInstructionByteSize(emitter, MF, std::next(MI,-1))
-+    + getInstructionByteSize(emitter, MF, std::next(MI,-2))
-+    + getInstructionByteSize(emitter, MF, std::next(MI,-3));
-+
-+  // adjust the lea instruction offset
-+  std::next(MI,-4)->getOperand(4).setImm(size);
 +  NumCalls++;
++
++  // erase the instruction pointed by MI ... MI now points to the instruction after the one erased
++  MI = MBB.erase_instr(&(*MI));
 +
 +  // adjust the iterator
 +  MI--;
@@ -459,20 +595,34 @@ index 000000000..3b4c179b4
 +  return true;
 +}
 +
-+
-+bool eliminateCallMemory(llvm::MCCodeEmitter *emitter, MachineFunction &MF, MachineBasicBlock &MBB, const X86InstrInfo *TII, const Register StackRegister, MachineBasicBlock::instr_iterator &MI) {
++/* convert:
++  call *"mem"
++  ---
++  lea __ImageBase(%rip), %clobber
++  add "mem", %clobber
++  sub $8, %rsp
++  mov %clobber, %gs:0(%rsp)
++  lea 1f(%rip), %clobber
++  xchg %clobber, %gs:0(%rsp)
++  jmp %clobber
++1:
++*/
++bool eliminateCallMemory(MachineBasicBlock &MBB, const X86InstrInfo *TII, MachineBasicBlock::iterator &MI) {
 +  LLVM_DEBUG(dbgs() << "I'm eliminating memory call instructions\n");
 +
 +  // extract the memory operand
 +  auto base         = MI->getOperand(X86::AddrBaseReg).getReg();
 +  auto scale        = MI->getOperand(X86::AddrScaleAmt).getImm();
 +  auto index        = MI->getOperand(X86::AddrIndexReg).getReg();
-+  auto displacement = MI->getOperand(X86::AddrDisp).getImm();
++  auto displacement = MI->getOperand(X86::AddrDisp);
 +  auto segment      = MI->getOperand(X86::AddrSegmentReg).getReg();
 +
 +  // change the segment register here if not already gs
 +  if (segment == X86::NoRegister) {
 +    segment = X86::GS;
++  }
++  if (segment == X86::GS && base == X86::RIP) {
++    base = X86::NoRegister;
 +  }
 +
 +  // we use R11, R10 or RAX as clobber register
@@ -489,35 +639,54 @@ index 000000000..3b4c179b4
 +  // copy the debug location for better dbg information
 +  auto debug_location = MI->getDebugLoc();
 +
-+  // erase the instruction pointed by MI ... MI now points to the instruction after the one erased
-+  MI = MBB.erase_instr(&(*MI));
++  // slice the MBB so we don't need to calculate the lea offset by hand
++  MachineBasicBlock *sinkMBB = sliceMBBAt(MI);
 +
-+  // first, we load the rip and offset it by 8 to get our return address after the function
-+  // 0 is a placeholder
-+  addRegOffset(BuildMI(MBB, MI, debug_location, TII->get(X86::LEA64r), clobber_reg), X86::RIP, false, 0);
 +
-+  // then we adjust the stack
-+  BuildMI(MBB, MI, debug_location, TII->get(X86::SUB64ri8), StackRegister).addReg(StackRegister).addImm(8);
++  // get image base
++  BuildMI(MBB, MI, debug_location, TII->get(X86::LEA64r), clobber_reg)
++    .MIB_ADD_MEM_SYMBOL("__ImageBase");
 +
-+  // then we move the return address we got in the first step onto the stack
-+  addSegmentedMem(BuildMI(MBB, MI, debug_location, TII->get(X86::MOV64mr)), X86::GS, StackRegister, 0).addReg(clobber_reg);
++  // add mem op to image base
++  BuildMI(MBB, MI, debug_location, TII->get(X86::ADD64rm))
++      .addReg(clobber_reg)
++      .addReg(clobber_reg)
++      .addReg(base)         // at X86::AddrBaseReg
++      .addImm(scale)        // at X86::AddrScaleAmt
++      .addReg(index)        // at X86::AddrIndexReg
++      .add(displacement) // at X86::AddrDisp
++      .addReg(segment);     // at X86::AddrSegmentReg
++
++  // adjust the stack after we have loaded the memory operand since the mem operand can istelf be on the stack
++  BuildMI(MBB, MI, debug_location, TII->get(X86::SUB64ri8), X86::RSP).addReg(X86::RSP)
++    .addImm(8);
++
++  // store the call address at the return address for now
++  addSegmentedMem(BuildMI(MBB, MI, debug_location, TII->get(X86::MOV64mr)), X86::GS, X86::RSP, 0)
++    .addReg(clobber_reg);
++
++  // load the return address into clobber reg
++  BuildMI(MBB, MI, debug_location, TII->get(X86::LEA64r), clobber_reg)
++    .MIB_ADD_MBB_ADDRESS(sinkMBB);
++
++  // xchange the return address with the call address
++  BuildMI(MBB, MI, debug_location, TII->get(X86::XCHG64rm))
++    .addReg(clobber_reg)
++    .addReg(clobber_reg)
++    .addReg(X86::RSP)
++    .addImm(1)
++    .addReg(X86::NoRegister)
++    .addImm(0)
++    .addReg(X86::GS);
 +
 +  // finally, we can jump to our function instead of calling it
-+  BuildMI(MBB, MI, debug_location, TII->get(X86::JMP64m))
-+    .addReg(base)         // at X86::AddrBaseReg
-+    .addImm(scale)        // at X86::AddrScaleAmt
-+    .addReg(index)        // at X86::AddrIndexReg
-+    .addImm(displacement) // at X86::AddrDisp
-+    .addReg(segment);     // at X86::AddrSegmentReg
++  BuildMI(MBB, MI, debug_location, TII->get(X86::JMP64r))
++    .addReg(clobber_reg);
 +
-+  // calculate the byte size of the instructions between the lea and the jump
-+  unsigned size = getInstructionByteSize(emitter, MF, std::next(MI,-1))
-+    + getInstructionByteSize(emitter, MF, std::next(MI,-2))
-+    + getInstructionByteSize(emitter, MF, std::next(MI,-3));
-+
-+  // adjust the lea instruction offset
-+  std::next(MI,-4)->getOperand(4).setImm(size);
 +  NumCalls++;
++
++  // erase the instruction pointed by MI ... MI now points to the instruction after the one erased
++  MI = MBB.erase_instr(&(*MI));
 +
 +  // adjust the iterator
 +  MI--;
@@ -525,11 +694,168 @@ index 000000000..3b4c179b4
 +  return true;
 +}
 +
++/* convert:
++  jmp *%reg
++  ---
++  mov %reg, %gs:-4096(%rsp)    // red zone
++  lea __ImageBase(%rip), %reg
++  add %gs:-4096(%rsp), %reg
++  xchg %reg, %gs:-4096(%rsp)   // we need to restore the original value of reg!
++  jmp %gs:-4096(%rsp)
++1:
++  comment: this is tricky since the jmp instruction has no defined clobber register in the abi
++  therefore we use the red zone as temporal storage. One alternativ would be a distinct location inside the TCB and address
++  that over the fs segment
++*/
++bool eliminateJumpRegister(MachineBasicBlock &MBB, const X86InstrInfo *TII, MachineBasicBlock::iterator &MI) {
++  LLVM_DEBUG(dbgs() << "I'm eliminating jump register instructions\n");
++
++  // copy the debug location for better dbg information
++  auto debug_location = MI->getDebugLoc();
++
++  // register used in call
++  auto reg = MI->getOperand(0).getReg();
++
++  // erase the instruction pointed by MI ... MI now points to the instruction after the one erased
++  MI = MBB.erase_instr(&(*MI));
++
++  // save used_reg on the read zone
++  BuildMI(MBB, MI, debug_location, TII->get(X86::MOV64mr))
++    .addReg(X86::RSP)
++    .addImm(1)
++    .addReg(X86::NoRegister)
++    .addImm(-4096)
++    .addReg(X86::GS)
++    .addReg(reg);
++
++  // get image base
++  BuildMI(MBB, MI, debug_location, TII->get(X86::LEA64r), reg)
++    .MIB_ADD_MEM_SYMBOL("__ImageBase");
++
++  // add mem op to image base
++  BuildMI(MBB, MI, debug_location, TII->get(X86::ADD64rm))
++    .addReg(reg)
++    .addReg(reg)
++    .addReg(X86::RSP)         // at X86::AddrBaseReg
++    .addImm(1)                // at X86::AddrScaleAmt
++    .addReg(X86::NoRegister)  // at X86::AddrIndexReg
++    .addImm(-4096)            // at X86::AddrDisp
++    .addReg(X86::GS);         // at X86::AddrSegmentReg
++
++  // xchange saved old reg_with reg
++  BuildMI(MBB, MI, debug_location, TII->get(X86::XCHG64rm))
++    .addReg(reg)
++    .addReg(reg)
++    .addReg(X86::RSP)
++    .addImm(1)
++    .addReg(X86::NoRegister)
++    .addImm(-4096)
++    .addReg(X86::GS);
++
++  // the real address is now on the stack! jump to it! ... we can zero this but since we are inside the enclave we cant execute 0
++  BuildMI(MBB, MI, debug_location, TII->get(X86::JMP64m))
++    .addReg(X86::RSP)         // at X86::AddrBaseReg
++    .addImm(1)                // at X86::AddrScaleAmt
++    .addReg(X86::NoRegister)  // at X86::AddrIndexReg
++    .addImm(-4096)            // at X86::AddrDisp
++    .addReg(X86::GS);         // at X86::AddrSegmentReg
++
++  // adjust the iterator
++  MI--;
++  
++  return true;
++}
++
++
++/* convert:
++  jmp *"mem"
++  ---
++  mov %clobber, %gs:-4096(%rsp)    // red zone
++  lea __ImageBase(%rip), %clobber
++  add "mem", %clobber 
++  xchg %gs:-4096(%rsp), %clobber
++  jmp *%gs:-4096(%rsp)
++1:
++  comment: this is tricky since the jmp instruction has no defined clobber register in the abi
++  therefore we use the red zone as temporal storage. One alternativ would be a distinct location inside the TCB and address
++  that over the fs segment
++*/
++bool eliminateJumpMemory(MachineBasicBlock &MBB, const X86InstrInfo *TII, MachineBasicBlock::iterator &MI) {
++  LLVM_DEBUG(dbgs() << "I'm eliminating jump memory instructions\n");
++
++  // extract the memory operand
++  auto base         = MI->getOperand(X86::AddrBaseReg).getReg();
++  auto scale        = MI->getOperand(X86::AddrScaleAmt).getImm();
++  auto index        = MI->getOperand(X86::AddrIndexReg).getReg();
++  auto displacement = MI->getOperand(X86::AddrDisp);
++  auto segment      = MI->getOperand(X86::AddrSegmentReg).getReg();
++
++  // change the segment register here if not already gs
++  if (segment == X86::NoRegister) {
++    segment = X86::GS;
++  }
++  if (segment == X86::GS && base == X86::RIP) {
++    base = X86::NoRegister;
++  }
++
++  unsigned used_reg = X86::R11;
++
++  // copy the debug location for better dbg information
++  auto debug_location = MI->getDebugLoc();
++
++  // erase the instruction pointed by MI ... MI now points to the instruction after the one erased
++  MI = MBB.erase_instr(&(*MI));
++
++  // save used_reg on the read zone
++  BuildMI(MBB, MI, debug_location, TII->get(X86::MOV64mr))
++    .addReg(X86::RSP)
++    .addImm(1)
++    .addReg(X86::NoRegister)
++    .addImm(-4096)
++    .addReg(X86::GS)
++    .addReg(used_reg);
++
++  // get image base
++  BuildMI(MBB, MI, debug_location, TII->get(X86::LEA64r), used_reg)
++    .MIB_ADD_MEM_SYMBOL("__ImageBase");
++
++  // add mem op to image base
++  BuildMI(MBB, MI, debug_location, TII->get(X86::ADD64rm))
++    .addReg(used_reg)
++    .addReg(used_reg)
++    .addReg(base)         // at X86::AddrBaseReg
++    .addImm(scale)        // at X86::AddrScaleAmt
++    .addReg(index)        // at X86::AddrIndexReg
++    .add(displacement)    // at X86::AddrDisp
++    .addReg(segment);     // at X86::AddrSegmentReg
++
++  // xchange saved old reg_with reg
++  BuildMI(MBB, MI, debug_location, TII->get(X86::XCHG64rm))
++    .addReg(used_reg)
++    .addReg(used_reg)
++    .addReg(X86::RSP)
++    .addImm(1)
++    .addReg(X86::NoRegister)
++    .addImm(-4096)
++    .addReg(X86::GS);
++
++  // the real address is now on the stack! jump to it! ... we can zero this but since we are inside the enclave we cant execute 0
++  BuildMI(MBB, MI, debug_location, TII->get(X86::JMP64m))
++    .addReg(X86::RSP)         // at X86::AddrBaseReg
++    .addImm(1)                // at X86::AddrScaleAmt
++    .addReg(X86::NoRegister)  // at X86::AddrIndexReg
++    .addImm(-4096)            // at X86::AddrDisp
++    .addReg(X86::GS);         // at X86::AddrSegmentReg
++
++  // adjust the iterator
++  MI--;
++
++  return true;
++}
 +
 +bool mitigateLVI(const X86Subtarget *Subtarget, const Function &F, MachineFunction &MF) {
 +  const X86RegisterInfo *TRI = Subtarget->getRegisterInfo();
 +  const X86InstrInfo *TII = Subtarget->getInstrInfo();
-+  const Register StackRegister = TRI->getStackRegister();
 +
 +  bool Modified = false;
 +
@@ -543,36 +869,53 @@ index 000000000..3b4c179b4
 +      continue;
 +
 +    // for each machine instruction
-+    for(auto MI=MBB.instr_begin(); MI!=MBB.instr_end(); ++MI) {
++    for(auto MI=MBB.begin(); MI!=MBB.end(); ++MI) {
 +
 +      // check the op code
 +      switch(MI->getOpcode()) {
 +        // RETURN
 +        case X86::RETQ:
-+          Modified |= eliminateRet(MBB, TII, StackRegister, MI);
++          Modified |= eliminateRet(MBB, TII, MI);
 +          break;
 +
-+        // PUSH
++        // PUSHES
 +        case X86::PUSH64r:
 +        case X86::PUSH32r:
-+          Modified |= eliminatePush(MBB, TII, StackRegister, MI);
++          Modified |= eliminatePushRegister(MBB, TII, MI);
++          break;
++        
++        case X86::PUSH64rmm:
++          Modified |= eliminatePushMemory(MBB, TII, MI);
 +          break;
 +
-+        // POP
++        // POPS
 +        case X86::POP64r:
 +        case X86::POP32r:
-+          Modified |= eliminatePop(MBB, TII, StackRegister, MI);
++          Modified |= eliminatePop(MBB, TII, MI);
 +          break;
 +
 +        // CALLS
 +        case X86::CALL64pcrel32:
-+          Modified |= eliminateCallPCRel(CodeEmitter, MF, MBB, TII, StackRegister, MI);
++          Modified |= eliminateCallPCRel(MBB, TII, MI);
 +          break;
 +        case X86::CALL64r:
-+          Modified |= eliminateCallRegister(CodeEmitter, MF, MBB, TII, StackRegister, MI);
++          Modified |= eliminateCallRegister(MBB, TII, MI);
 +          break;
 +        case X86::CALL64m:
-+          Modified |= eliminateCallMemory(CodeEmitter, MF, MBB, TII, StackRegister, MI);
++          Modified |= eliminateCallMemory(MBB, TII, MI);
++          break;
++
++        // JUMPS
++        case X86::TAILJMPr:
++        case X86::TAILJMPr64:
++        case X86::JMP64r:
++          Modified |= eliminateJumpRegister(MBB, TII, MI);
++          break;
++
++        case X86::TAILJMPm:
++        case X86::TAILJMPm64:
++        case X86::JMP64m:
++          Modified |= eliminateJumpMemory(MBB, TII, MI);
 +          break;
 +
 +        // Everything else which uses a memory operand
@@ -588,6 +931,7 @@ index 000000000..3b4c179b4
 +          mem_op_index += X86II::getOperandBias(Desc);
 +
 +          // calculate the index of the segment register in the memory operand
++          unsigned base_op_index = mem_op_index + X86::AddrBaseReg;
 +          unsigned segment_op_index = mem_op_index + X86::AddrSegmentReg;
 +
 +          // sanity check .. should not happen
@@ -597,16 +941,19 @@ index 000000000..3b4c179b4
 +          }
 +
 +          // base and segment register
-+          auto base    = MI->getOperand(mem_op_index + X86::AddrBaseReg).getReg(); 
++          auto base    = MI->getOperand(base_op_index).getReg(); 
 +          auto segment = MI->getOperand(segment_op_index).getReg();
 +
 +          // only change segment register if the segment is not already set and the 
 +          // memory operand does not use realtive addressing
-+          if (base != X86::RIP && segment == X86::NoRegister) {
++          if (/*base != X86::RIP &&*/ segment == X86::NoRegister) {
 +            MI->getOperand(segment_op_index).ChangeToRegister(X86::GS, false);
 +            Modified = true;
++            if ( base == X86::RIP ) {
++              MI->getOperand(base_op_index).ChangeToRegister(X86::NoRegister, false);
++            }
 +          }
-+
++          
 +          break;
 +        }
 +      } // end of switch
@@ -682,7 +1029,7 @@ index 5c26767c1..043c6b552 100644
    MisExpect.cpp
 diff --git a/llvm/lib/Transforms/Utils/LVIMitigation.cpp b/llvm/lib/Transforms/Utils/LVIMitigation.cpp
 new file mode 100644
-index 000000000..599cc6f43
+index 000000000..a2054afeb
 --- /dev/null
 +++ b/llvm/lib/Transforms/Utils/LVIMitigation.cpp
 @@ -0,0 +1,138 @@
@@ -789,7 +1136,7 @@ index 000000000..599cc6f43
 +        }
 +
 +        // make all loads GS-relative if not already
-+        if(auto LI = dyn_cast<LoadInst>(&I)) {
++        /*if(auto LI = dyn_cast<LoadInst>(&I)) {
 +          auto type = LI->getPointerOperandType();
 +          auto operand = LI->getPointerOperand();
 +          if(dyn_cast<GlobalVariable>(operand))
@@ -800,18 +1147,18 @@ index 000000000..599cc6f43
 +            Modified = true;
 +            NumLoadsModified++;
 +          }
-+        }
++        }*/
 +      }
 +    }
 +  }
 +
 +  // make all global variables GS-realtive
-+  for(auto &global : M.getGlobalList()) {
++  /*for(auto &global : M.getGlobalList()) {
 +    auto new_type = global.getType()->getPointerTo(256);
 +    global.mutateType(new_type);
 +    Modified = true;
 +    NumGlobalsModified++;
-+  }
++  }*/
 +  return Modified;
 +}
 +

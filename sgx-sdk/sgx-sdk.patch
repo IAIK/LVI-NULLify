@@ -14,7 +14,7 @@ index 5fb368a9..dd365e8c 100644
  deb_libsgx_ae_qe3:
  ifeq ("$(wildcard ./external/dcap_source/QuoteGeneration/psw/ae/data/prebuilt/libsgx_qe3.signed.so)", "")
 diff --git a/buildenv.mk b/buildenv.mk
-index 331611d7..ed6054c1 100644
+index 331611d7..b76d1c06 100644
 --- a/buildenv.mk
 +++ b/buildenv.mk
 @@ -67,6 +67,10 @@ NIPD := .nipd
@@ -22,8 +22,8 @@ index 331611d7..ed6054c1 100644
  CC ?= gcc
  
 +#compiler for trusted sdk part
-+TR_CC ?= $(ROOT_DIR)/../../compiler/clang-gs
-+TR_CXX ?= $(ROOT_DIR)/../../compiler/clang-gs++
++TR_CC ?= $(ROOT_DIR)/../compiler/clang-gs
++TR_CXX ?= $(ROOT_DIR)/../compiler/clang-gs++
 +
  # clean the content of 'INCLUDE' - this variable will be set by vcvars32.bat
  # thus it will cause build error when this variable is used by our Makefile,
@@ -56,11 +56,24 @@ index 331611d7..ed6054c1 100644
  ifneq ($(origin NIX_PATH), environment)
  BINUTILS_DIR = /usr/local/bin
  else
+@@ -240,10 +252,10 @@ MITIGATION_CFLAGS += $(MITIGATION_ASFLAGS)
+ # When `pie' is enabled, the linker (both BFD and Gold) under Ubuntu 14.04
+ # will hide all symbols from dynamic symbol table even if they are marked
+ # as `global' in the LD version script.
+-ENCLAVE_CFLAGS   = -ffreestanding -nostdinc -fvisibility=hidden -fpie -fno-strict-overflow -fno-delete-null-pointer-checks
++ENCLAVE_CFLAGS   = -ffreestanding -nostdinc -fvisibility=hidden -fno-strict-overflow -fno-delete-null-pointer-checks
+ ENCLAVE_CXXFLAGS = $(ENCLAVE_CFLAGS) -nostdinc++
+ ENCLAVE_LDFLAGS  = -B$(BINUTILS_DIR) $(COMMON_LDFLAGS) -Wl,-Bstatic -Wl,-Bsymbolic -Wl,--no-undefined \
+-                   -Wl,-pie,-eenclave_entry -Wl,--export-dynamic  \
++                   -Wl,-eenclave_entry -Wl,--export-dynamic  \
+                    -Wl,--defsym,__ImageBase=0
+ 
+ ENCLAVE_CFLAGS += $(MITIGATION_CFLAGS)
 diff --git a/common/inc/internal/linux/linux-regs.h b/common/inc/internal/linux/linux-regs.h
-index 6279a9c1..96f80d28 100644
+index 6279a9c1..4ec45c1c 100644
 --- a/common/inc/internal/linux/linux-regs.h
 +++ b/common/inc/internal/linux/linux-regs.h
-@@ -164,6 +164,39 @@
+@@ -164,6 +164,40 @@
      pop     %xbp
  .endm
  
@@ -87,10 +100,11 @@ index 6279a9c1..96f80d28 100644
 +.endm
 +
 +.macro GS_REL_CALL_SYMBOL name
-+    lea 14(%rip), %rax
++    lea 1f(%rip), %rax
 +    sub $8, %rsp
 +    mov %rax, %gs:(%rsp)
 +    jmp \name
++1:
 +.endm
 +
 +.macro GS_REL_GET_BASE reg
@@ -100,7 +114,7 @@ index 6279a9c1..96f80d28 100644
  /* `paramN' (N = 1,2,3,4) should be registers. */
  .macro SET_PARAMS param1:req, param2, param3, param4
  #if defined(LINUX32)
-@@ -275,4 +308,5 @@
+@@ -275,4 +309,5 @@
  #endif
  .endm
  
@@ -203,6 +217,33 @@ index 4ada7c0b..040932dd 100644
 -    ret
 -
 +    GS_REL_RET
+diff --git a/external/dcap_source b/external/dcap_source
+index 4605fae1..96ea09b7 160000
+--- a/external/dcap_source
++++ b/external/dcap_source
+@@ -1 +1 @@
+-Subproject commit 4605fae1c606de4ff1191719433f77f050f1c33c
++Subproject commit 96ea09b72c52852be166ce21e435562e74f9966d
+diff --git a/external/dnnl/dnnl b/external/dnnl/dnnl
+index e1fe0eb8..52c3052d 160000
+--- a/external/dnnl/dnnl
++++ b/external/dnnl/dnnl
+@@ -1 +1 @@
+-Subproject commit e1fe0eb8119645778ea31bcd42b790b61f6b4577
++Subproject commit 52c3052df8ec1d5b8b45cb6c350a952840eabd42
+diff --git a/external/ippcp_internal/ipp-crypto b/external/ippcp_internal/ipp-crypto
+new file mode 160000
+index 00000000..415960b5
+--- /dev/null
++++ b/external/ippcp_internal/ipp-crypto
+@@ -0,0 +1 @@
++Subproject commit 415960b5844594d4e763ca4c246baaf399e342e2
+diff --git a/external/openmp/openmp_code b/external/openmp/openmp_code
+--- a/external/openmp/openmp_code
++++ b/external/openmp/openmp_code
+@@ -1 +1 @@
+-Subproject commit c9e7fc8c97382d61565f7ed180e4ea1cc8895b95
++Subproject commit c9e7fc8c97382d61565f7ed180e4ea1cc8895b95-dirty
 diff --git a/make_psw_debug.sh b/make_psw_debug.sh
 new file mode 100755
 index 00000000..e95b0ad2
@@ -433,11 +474,229 @@ index ea983b82..3fa04205 100644
  #include <stdlib.h>
  #include <string.h>
  #include <unistd.h>
+diff --git a/sdk/cpprt/linux/libunwind/src/dwarf/Gfde.c b/sdk/cpprt/linux/libunwind/src/dwarf/Gfde.c
+index 9250b895..a690d07c 100644
+--- a/sdk/cpprt/linux/libunwind/src/dwarf/Gfde.c
++++ b/sdk/cpprt/linux/libunwind/src/dwarf/Gfde.c
+@@ -182,6 +182,15 @@ parse_cie (unw_addr_space_t as, unw_accessors_t *a, unw_word_t addr,
+         /* read the personality-routine pointer-encoding format.  */
+         if ((ret = dwarf_readu8 (as, a, &addr, &handler_encoding, arg)) < 0)
+           return ret;
++        
++        // since we use gs as base we only have diffs as addresses
++        // therefore we need to adapt the type of the eh_frame encoding for 
++        // the handler.
++        if ( (DW_EH_PE_uleb128 <= (handler_encoding & DW_EH_PE_FORMAT_MASK)) 
++          && ((handler_encoding & DW_EH_PE_FORMAT_MASK) <= DW_EH_PE_udata8) ) {
++          handler_encoding += 8; // convert encoding from unsigned to signed
++        }
++        
+         if ((ret = dwarf_read_encoded_pointer (as, a, &addr, handler_encoding,
+                                                pi, &dci->handler, arg)) < 0)
+           return ret;
+diff --git a/sdk/cpprt/linux/libunwind/src/dwarf/Gparser.c b/sdk/cpprt/linux/libunwind/src/dwarf/Gparser.c
+index ad89352b..be663452 100644
+--- a/sdk/cpprt/linux/libunwind/src/dwarf/Gparser.c
++++ b/sdk/cpprt/linux/libunwind/src/dwarf/Gparser.c
+@@ -28,6 +28,8 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.  */
+ #include <stddef.h>
+ #include <limits.h>
+ 
++extern unw_word_t get_real_enclave_base();
++
+ #define alloc_reg_state()       (mempool_alloc (&dwarf_reg_state_pool))
+ #define free_reg_state(rs)      (mempool_free (&dwarf_reg_state_pool, rs))
+ 
+@@ -864,7 +866,7 @@ apply_reg_state (struct dwarf_cursor *c, struct dwarf_reg_state *rs)
+     ret = dwarf_get (c, c->loc[rs->ret_addr_column], &ip);
+     if (ret < 0)
+       return ret;
+-    c->ip = ip;
++    c->ip = ip - get_real_enclave_base();
+     ret = 1;
+   }
+ 
+diff --git a/sdk/cpprt/linux/libunwind/src/x86_64/getcontext.S b/sdk/cpprt/linux/libunwind/src/x86_64/getcontext.S
+index 7a8b5664..59ffea2b 100644
+--- a/sdk/cpprt/linux/libunwind/src/x86_64/getcontext.S
++++ b/sdk/cpprt/linux/libunwind/src/x86_64/getcontext.S
+@@ -40,30 +40,30 @@ _Ux86_64_getcontext:
+ 	.cfi_startproc
+ 
+ 	/* Callee saved: RBX, RBP, R12-R15  */
+-	movq %r12, UC_MCONTEXT_GREGS_R12(%rdi)
+-	movq %r13, UC_MCONTEXT_GREGS_R13(%rdi)
+-	movq %r14, UC_MCONTEXT_GREGS_R14(%rdi)
+-	movq %r15, UC_MCONTEXT_GREGS_R15(%rdi)
+-	movq %rbp, UC_MCONTEXT_GREGS_RBP(%rdi)
+-	movq %rbx, UC_MCONTEXT_GREGS_RBX(%rdi)
++	movq %r12, %gs:UC_MCONTEXT_GREGS_R12(%rdi)
++	movq %r13, %gs:UC_MCONTEXT_GREGS_R13(%rdi)
++	movq %r14, %gs:UC_MCONTEXT_GREGS_R14(%rdi)
++	movq %r15, %gs:UC_MCONTEXT_GREGS_R15(%rdi)
++	movq %rbp, %gs:UC_MCONTEXT_GREGS_RBP(%rdi)
++	movq %rbx, %gs:UC_MCONTEXT_GREGS_RBX(%rdi)
+ 
+ 	/* Save argument registers (not strictly needed, but setcontext 
+ 	   restores them, so don't restore garbage).  */
+-	movq %r8,  UC_MCONTEXT_GREGS_R8(%rdi)
+-	movq %r9,  UC_MCONTEXT_GREGS_R9(%rdi)
+-	movq %rdi, UC_MCONTEXT_GREGS_RDI(%rdi)
+-	movq %rsi, UC_MCONTEXT_GREGS_RSI(%rdi)
+-	movq %rdx, UC_MCONTEXT_GREGS_RDX(%rdi)
+-	movq %rax, UC_MCONTEXT_GREGS_RAX(%rdi)
+-	movq %rcx, UC_MCONTEXT_GREGS_RCX(%rdi)
++	movq %r8,  %gs:UC_MCONTEXT_GREGS_R8(%rdi)
++	movq %r9,  %gs:UC_MCONTEXT_GREGS_R9(%rdi)
++	movq %rdi, %gs:UC_MCONTEXT_GREGS_RDI(%rdi)
++	movq %rsi, %gs:UC_MCONTEXT_GREGS_RSI(%rdi)
++	movq %rdx, %gs:UC_MCONTEXT_GREGS_RDX(%rdi)
++	movq %rax, %gs:UC_MCONTEXT_GREGS_RAX(%rdi)
++	movq %rcx, %gs:UC_MCONTEXT_GREGS_RCX(%rdi)
+ 
+ #if defined __linux__
+ 	/* Save fp state (not needed, except for setcontext not
+ 	   restoring garbage).  */
+ 	leaq UC_MCONTEXT_FPREGS_MEM(%rdi),%r8
+-	movq %r8, UC_MCONTEXT_FPREGS_PTR(%rdi)
+-	fnstenv (%r8)
+-	stmxcsr FPREGS_OFFSET_MXCSR(%r8)
++	movq %r8, %gs:UC_MCONTEXT_FPREGS_PTR(%rdi)
++	fnstenv %gs:(%r8)
++	stmxcsr %gs:FPREGS_OFFSET_MXCSR(%r8)
+ #elif defined __FreeBSD__
+ 	fxsave UC_MCONTEXT_FPSTATE(%rdi)
+ 	movq $UC_MCONTEXT_FPOWNED_FPU,UC_MCONTEXT_OWNEDFP(%rdi)
+@@ -90,14 +90,20 @@ _Ux86_64_getcontext:
+ #error Port me
+ #endif
+ 
+-	leaq 8(%rsp), %rax /* exclude this call.  */
+-	movq %rax, UC_MCONTEXT_GREGS_RSP(%rdi)
++	leaq %gs:8(%rsp), %rax /* exclude this call.  */
++	movq %rax, %gs:UC_MCONTEXT_GREGS_RSP(%rdi)
+ 
+-	movq 0(%rsp), %rax
+-	movq %rax, UC_MCONTEXT_GREGS_RIP(%rdi)
++	lea  __ImageBase(%rip), %rax
++	neg  %rax
++	add  %gs:0(%rsp), %rax 
++	movq %rax, %gs:UC_MCONTEXT_GREGS_RIP(%rdi)
+ 
+ 	xorq	%rax, %rax
+-	retq
++
++	mov   %gs:(%rsp), %rcx
++	add   $8, %rsp
++	jmp   *%rcx
++
+ 	.cfi_endproc
+ 	.size _Ux86_64_getcontext, . - _Ux86_64_getcontext
+ 
+@@ -116,17 +122,23 @@ _Ux86_64_getcontext_trace:
+ 	.cfi_startproc
+ 
+ 	/* Save only RBP, RBX, RSP, RIP - exclude this call. */
+-	movq %rbp, UC_MCONTEXT_GREGS_RBP(%rdi)
+-	movq %rbx, UC_MCONTEXT_GREGS_RBX(%rdi)
++	movq %rbp, %gs:UC_MCONTEXT_GREGS_RBP(%rdi)
++	movq %rbx, %gs:UC_MCONTEXT_GREGS_RBX(%rdi)
+ 
+-	leaq 8(%rsp), %rax
+-	movq %rax, UC_MCONTEXT_GREGS_RSP(%rdi)
++	leaq %gs:8(%rsp), %rax
++	movq %rax, %gs:UC_MCONTEXT_GREGS_RSP(%rdi)
+ 
+-	movq 0(%rsp), %rax
+-	movq %rax, UC_MCONTEXT_GREGS_RIP(%rdi)
++	lea  __ImageBase(%rip), %rax
++	neg  %rax
++	add  %gs:0(%rsp), %rax 
++	movq %rax, %gs:UC_MCONTEXT_GREGS_RIP(%rdi)
+ 
+ 	xorq	%rax, %rax
+-	retq
++
++	mov   %gs:(%rsp), %rcx
++	add   $8, %rsp
++	jmp   *%rcx
++	
+ 	.cfi_endproc
+ 	.size _Ux86_64_getcontext_trace, . - _Ux86_64_getcontext_trace
+ 
+diff --git a/sdk/cpprt/linux/libunwind/src/x86_64/setcontext.S b/sdk/cpprt/linux/libunwind/src/x86_64/setcontext.S
+index 358217de..d9f3fe57 100644
+--- a/sdk/cpprt/linux/libunwind/src/x86_64/setcontext.S
++++ b/sdk/cpprt/linux/libunwind/src/x86_64/setcontext.S
+@@ -39,9 +39,9 @@ _Ux86_64_setcontext:
+ 
+ #if defined __linux__
+         /* restore fp state */
+-	mov    UC_MCONTEXT_FPREGS_PTR(%rdi),%r8
+-	fldenv (%r8)
+-	ldmxcsr FPREGS_OFFSET_MXCSR(%r8)
++	mov    %gs:UC_MCONTEXT_FPREGS_PTR(%rdi),%r8
++	fldenv %gs:(%r8)
++	ldmxcsr %gs:FPREGS_OFFSET_MXCSR(%r8)
+ #elif defined __FreeBSD__
+ 	/* restore fp state */
+ 	cmpq $UC_MCONTEXT_FPOWNED_FPU,UC_MCONTEXT_OWNEDFP(%rdi)
+@@ -55,27 +55,32 @@ _Ux86_64_setcontext:
+ #endif
+ 
+ 	/* restore the rest of the state */
+-	mov    UC_MCONTEXT_GREGS_R8(%rdi),%r8
+-	mov    UC_MCONTEXT_GREGS_R9(%rdi),%r9
+-	mov    UC_MCONTEXT_GREGS_RBX(%rdi),%rbx
+-	mov    UC_MCONTEXT_GREGS_RBP(%rdi),%rbp
+-	mov    UC_MCONTEXT_GREGS_R12(%rdi),%r12
+-	mov    UC_MCONTEXT_GREGS_R13(%rdi),%r13
+-	mov    UC_MCONTEXT_GREGS_R14(%rdi),%r14
+-	mov    UC_MCONTEXT_GREGS_R15(%rdi),%r15
+-	mov    UC_MCONTEXT_GREGS_RSI(%rdi),%rsi
+-	mov    UC_MCONTEXT_GREGS_RDX(%rdi),%rdx
+-	mov    UC_MCONTEXT_GREGS_RAX(%rdi),%rax
+-	mov    UC_MCONTEXT_GREGS_RCX(%rdi),%rcx
+-	mov    UC_MCONTEXT_GREGS_RSP(%rdi),%rsp
++	mov    %gs:UC_MCONTEXT_GREGS_R8(%rdi),%r8
++	mov    %gs:UC_MCONTEXT_GREGS_R9(%rdi),%r9
++	mov    %gs:UC_MCONTEXT_GREGS_RBX(%rdi),%rbx
++	mov    %gs:UC_MCONTEXT_GREGS_RBP(%rdi),%rbp
++	mov    %gs:UC_MCONTEXT_GREGS_R12(%rdi),%r12
++	mov    %gs:UC_MCONTEXT_GREGS_R13(%rdi),%r13
++	mov    %gs:UC_MCONTEXT_GREGS_R14(%rdi),%r14
++	mov    %gs:UC_MCONTEXT_GREGS_R15(%rdi),%r15
++	mov    %gs:UC_MCONTEXT_GREGS_RSI(%rdi),%rsi
++	mov    %gs:UC_MCONTEXT_GREGS_RDX(%rdi),%rdx
++	mov    %gs:UC_MCONTEXT_GREGS_RAX(%rdi),%rax
++	mov    %gs:UC_MCONTEXT_GREGS_RCX(%rdi),%rcx
++	mov    %gs:UC_MCONTEXT_GREGS_RSP(%rdi),%rsp
+ 
+         /* push the return address on the stack */
+-	mov    UC_MCONTEXT_GREGS_RIP(%rdi),%rcx
+-	push   %rcx
++	lea    __ImageBase(%rip), %rcx
++	add    %gs:UC_MCONTEXT_GREGS_RIP(%rdi),%rcx
++	sub    $8, %rsp
++	mov    %rcx, %gs:(%rsp)
+ 
+-	mov    UC_MCONTEXT_GREGS_RCX(%rdi),%rcx
+-	mov    UC_MCONTEXT_GREGS_RDI(%rdi),%rdi
+-	retq
++	mov    %gs:UC_MCONTEXT_GREGS_RCX(%rdi),%rcx
++	mov    %gs:UC_MCONTEXT_GREGS_RDI(%rdi),%rdi
++
++	mov    %gs:(%rsp), %rcx
++	add    $8, %rsp
++	jmp    *%rcx
+ 
+ 	.size _Ux86_64_setcontext, . - _Ux86_64_setcontext
+ 
 diff --git a/sdk/debugger_interface/linux/se_ptrace.c b/sdk/debugger_interface/linux/se_ptrace.c
-index 9efe20f9..480b6b1b 100644
+index 9efe20f9..aa7ff493 100644
 --- a/sdk/debugger_interface/linux/se_ptrace.c
 +++ b/sdk/debugger_interface/linux/se_ptrace.c
-@@ -324,6 +324,22 @@ static int get_enclave_gregs(pid_t pid, struct user_regs_struct *regs, long tcs_
+@@ -324,6 +324,25 @@ static int get_enclave_gregs(pid_t pid, struct user_regs_struct *regs, long tcs_
      SSA2USER_REG(regs, gpr, 13);
      SSA2USER_REG(regs, gpr, 14);
      SSA2USER_REG(regs, gpr, 15);
@@ -450,6 +709,9 @@ index 9efe20f9..480b6b1b 100644
 +
 +    regs->gs = gs;
 +    regs->fs = gpr.fs;
++
++    regs->rbp += gs;
++    regs->rsp += gs;
 +
 +    /*if (tmp_rbp < user_space_mask && tmp_rsp < user_space_mask) {
 +        regs->rbp += tmp_rbp;
@@ -533,6 +795,22 @@ index 11137c72..9cb645f3 100644
                        ]
                        @ check_size @
                        [
+diff --git a/sdk/encrypt_enclave/Makefile b/sdk/encrypt_enclave/Makefile
+index e47d9b32..9b322ba5 100644
+--- a/sdk/encrypt_enclave/Makefile
++++ b/sdk/encrypt_enclave/Makefile
+@@ -37,9 +37,9 @@ endif
+ 
+ INC_DIR	:= -I$(COMMON_DIR)/inc -I$(COMMON_DIR)/inc/internal -I.
+ CXXFLAGS += $(INC_DIR) -Wno-attributes -g -mrdrnd -fpie
+-LDFLAGS := -pie $(COMMON_LDFLAGS)
++LDFLAGS := -pie $(COMMON_LDFLAGS) -Wl,--defsym,__ImageBase=0
+ 
+-LINK_FLAGS := -lcrypto -L$(BUILD_DIR) -lsgx_tservice
++LINK_FLAGS := -lcrypto -L$(BUILD_DIR) -lsgx_tservice 
+ CPP_FILES := encryptip.cpp
+ OBJS := $(CPP_FILES:.cpp=.o)
+ TOOL_NAME := sgx_encrypt
 diff --git a/sdk/gperftools/Makefile b/sdk/gperftools/Makefile
 index 6d91aabc..edc0c27d 100644
 --- a/sdk/gperftools/Makefile
@@ -613,6 +891,19 @@ index 6956b748..fa390558 100644
      tcs->ofs_limit = tcs->ogs_limit = (uint32_t)-1;
      return true;
  }
+diff --git a/sdk/simulation/urtssim/linux/Makefile b/sdk/simulation/urtssim/linux/Makefile
+index e9df68da..4fa81d99 100644
+--- a/sdk/simulation/urtssim/linux/Makefile
++++ b/sdk/simulation/urtssim/linux/Makefile
+@@ -64,7 +64,7 @@ DIR6 := $(LINUX_PSW_DIR)/../common/src
+ 
+ 
+ LDFLAGS += -L$(COMMON_DIR)/se_wrapper \
+-           -L$(SIM_DIR)/uae_service_sim/linux
++           -L$(SIM_DIR)/uae_service_sim/linux -Wl,--defsym,__ImageBase=0
+ LDFLAGS += -L$(VTUNE_DIR)/sdk/src/ittnotify/ -littnotify -ldl -lpthread
+ 
+ OBJ1 := enclave.o         \
 diff --git a/sdk/tkey_exchange/Makefile b/sdk/tkey_exchange/Makefile
 index 4fbeedef..7be0f3cd 100644
 --- a/sdk/tkey_exchange/Makefile
@@ -721,7 +1012,7 @@ index 74767eb8..b7aead28 100644
  
  char *
 diff --git a/sdk/tlibcrypto/Makefile b/sdk/tlibcrypto/Makefile
-index 08c72fc9..cad27afd 100644
+index 08c72fc9..26c6c823 100644
 --- a/sdk/tlibcrypto/Makefile
 +++ b/sdk/tlibcrypto/Makefile
 @@ -36,7 +36,7 @@ CPPFLAGS := -I$(COMMON_DIR)/inc/internal \
@@ -733,6 +1024,24 @@ index 08c72fc9..cad27afd 100644
  
  OBJ = init_tcrypto_lib.o sgx_aes_ctr.o sgx_rsa_encryption.o sgx_aes_gcm.o sgx_cmac128.o sgx_hmac.o sgx_ecc256.o sgx_ecc256_ecdsa.o sgx_sha256.o sgx_sha1.o sgx_sha256_msg.o sgx_ecc256_internal.o sgx_rsa3072.o sgx_internal.o
  SHARED_OBJ = tcrypto_version.o sgx_common_init_ipp.o
+@@ -71,7 +71,7 @@ PREPRARE_SGX_SSL:
+ 	chmod 755 $(PREPARE_SGXSSL)
+ 	test -f $(OPENSSL_LIBRARY_PATH)/lib$(SGXSSL_Library_Name).a || $(PREPARE_SGXSSL)
+ 
+-CPPFLAGS += -I$(OPENSSL_PACKAGE)/include -fPIC
++CPPFLAGS += -I$(OPENSSL_PACKAGE)/include
+ CXXFLAGS += -DUSE_SGXSSL
+ SRCDIR := sgxssl
+ 
+@@ -79,7 +79,7 @@ LIB_NAME := libsgx_tcrypto_sgxssl.a
+ 
+ else
+ # Build IPP crypto based sgx_tcrypto library
+-CFLAGS += $(CPPFLAGS) $(ENCLAVE_CFLAGS) $(SGX_COMMON_CFLAGS) -Werror -fno-exceptions -fPIC
++CFLAGS += $(CPPFLAGS) $(ENCLAVE_CFLAGS) $(SGX_COMMON_CFLAGS) -Werror -fno-exceptions
+ 
+ OBJ += sgx_tcrypto_common.o sgx_rsa_internal.o
+ SRCDIR := ipp
 diff --git a/sdk/tlibthread/Makefile b/sdk/tlibthread/Makefile
 index 8fbc206d..8464cbbb 100755
 --- a/sdk/tlibthread/Makefile
@@ -751,7 +1060,7 @@ index 8fbc206d..8464cbbb 100755
  CPPFLAGS := -I$(COMMON_DIR)/inc/internal \
              -I$(COMMON_DIR)/inc          \
 diff --git a/sdk/trts/Makefile b/sdk/trts/Makefile
-index e56b1277..834cf6f2 100644
+index e56b1277..acdefcbe 100644
 --- a/sdk/trts/Makefile
 +++ b/sdk/trts/Makefile
 @@ -38,9 +38,9 @@ CPPFLAGS += -I$(COMMON_DIR)/inc          \
@@ -766,11 +1075,25 @@ index e56b1277..834cf6f2 100644
  
  TCXXFLAGS := $(patsubst -fstack-protector%,-fno-stack-protector,$(CXXFLAGS))
  
+@@ -64,11 +64,11 @@ OBJS := $(OBJS1) $(OBJS2)
+ all: $(OBJS) elf_parser
+ 
+ $(OBJS1): %.o: %.cpp
+-	$(CXX) -c $(CXXFLAGS) $(CPPFLAGS) -fPIC $< -o $@
++	$(CXX) -c $(CXXFLAGS) $(CPPFLAGS) $< -o $@
+ 	objcopy $@ --set-section-flags .niprod='alloc','readonly'
+ 
+ $(OBJS2): %.o: %.cpp
+-	$(CXX) -c $(TCXXFLAGS) $(CPPFLAGS) -fPIC $< -o $@
++	$(CXX) -c $(TCXXFLAGS) $(CPPFLAGS) $< -o $@
+ 
+ .PHONY: elf_parser
+ elf_parser: $(OBJS)
 diff --git a/sdk/trts/init_enclave.cpp b/sdk/trts/init_enclave.cpp
-index 0832ab1c..25384640 100644
+index 0832ab1c..ad6159b2 100644
 --- a/sdk/trts/init_enclave.cpp
 +++ b/sdk/trts/init_enclave.cpp
-@@ -86,7 +86,8 @@ extern "C" int rsrv_mem_init(void *_rsrv_mem_base, size_t _rsrv_mem_size, size_t
+@@ -86,12 +86,13 @@ extern "C" int rsrv_mem_init(void *_rsrv_mem_base, size_t _rsrv_mem_size, size_t
  //
  extern "C" int init_enclave(void *enclave_base, void *ms)
  {
@@ -780,20 +1103,27 @@ index 0832ab1c..25384640 100644
      {
          return -1;
      }
-@@ -106,9 +107,10 @@ extern "C" int init_enclave(void *enclave_base, void *ms)
+ 
+-    if(NULL != pcl_entry)
++    if(0 && NULL != pcl_entry)
+     {
+         // LFENCE before pcl_entry
+         sgx_lfence();
+@@ -106,9 +107,11 @@ extern "C" int init_enclave(void *enclave_base, void *ms)
              return -1;
          }
      }
 -
 +    int reloc_ret;
-+    REL_PC_CALL_R_1(reloc_ret, relocate_enclave, enclave_base);
++    reloc_ret = relocate_enclave(enclave_base);
++    //REL_PC_CALL_R_1(reloc_ret, relocate_enclave, enclave_base);
      // relocation
 -    if(0 != relocate_enclave(enclave_base))
 +    if(0 != reloc_ret)
      {
          return -1;
      }
-@@ -216,21 +218,34 @@ extern size_t rsrv_mem_min_size;
+@@ -216,21 +219,37 @@ extern size_t rsrv_mem_min_size;
  
  sgx_status_t do_init_enclave(void *ms, void *tcs)
  {
@@ -807,10 +1137,12 @@ index 0832ab1c..25384640 100644
 -    void *enclave_base = get_enclave_base();
 -    if(ENCLAVE_INIT_NOT_STARTED != lock_enclave())
 +    void *enclave_base;
-+    REL_PC_CALL_R_0(enclave_base, get_enclave_base);
++    enclave_base = get_enclave_base();
++    //REL_PC_CALL_R_0(enclave_base, get_enclave_base);
 +    
 +    int lock_status;
-+    REL_PC_CALL_R_0(lock_status, lock_enclave);
++    lock_status = lock_enclave();
++    //REL_PC_CALL_R_0(lock_status, lock_enclave);
 +
 +    if(ENCLAVE_INIT_NOT_STARTED != lock_status)
      {
@@ -819,7 +1151,8 @@ index 0832ab1c..25384640 100644
 -    if(0 != init_enclave(enclave_base, ms))
 +
 +    int enclave_init_status;
-+    REL_PC_CALL_R_2(enclave_init_status, init_enclave, enclave_base, ms);
++    enclave_init_status = init_enclave(enclave_base, ms);
++    //REL_PC_CALL_R_2(enclave_init_status, init_enclave, enclave_base, ms);
 +    if(0 != enclave_init_status)
      {
          return SGX_ERROR_UNEXPECTED;
@@ -877,7 +1210,7 @@ index 42a03c93..e6a83c9f 100644
  CXXFLAGS += -Werror $(ENCLAVE_CXXFLAGS)      \
            -I$(LINUX_SDK_DIR)/trts            \
 diff --git a/sdk/trts/linux/elf_parser.c b/sdk/trts/linux/elf_parser.c
-index 1d5c233b..09c47860 100644
+index 1d5c233b..75c6c267 100644
 --- a/sdk/trts/linux/elf_parser.c
 +++ b/sdk/trts/linux/elf_parser.c
 @@ -42,13 +42,79 @@
@@ -988,13 +1321,13 @@ index 1d5c233b..09c47860 100644
      size_t aligned_virtual_size = 0;
  
 +    uint64_t enclave_real_base;
-+
-+    REL_PC_CALL_R_0(enclave_real_base, get_real_enclave_base);
++    enclave_real_base = get_real_enclave_base();
++    //REL_PC_CALL_R_0(enclave_real_base, get_real_enclave_base);
 +
      for (i = 0; i < nr_relocs; ++i, ++rela)
      {
          ElfW(Addr)* reloc_addr = GET_PTR(ElfW(Addr), enclave_base, rela->r_offset);
-@@ -95,41 +172,53 @@ static int do_relocs(const ElfW(Addr) enclave_base,
+@@ -95,41 +172,56 @@ static int do_relocs(const ElfW(Addr) enclave_base,
          switch (ELF64_R_TYPE(rela->r_info))
          {
              case R_X86_64_RELATIVE:
@@ -1008,7 +1341,8 @@ index 1d5c233b..09c47860 100644
 -                sym = get_sym(symtab, ELF64_R_SYM(rela->r_info));
 +            case R_X86_64_64: {
 +                size_t sym_index = ELF64_R_SYM(rela->r_info);
-+                REL_PC_CALL_R_2(sym, get_sym, symtab, sym_index);
++                sym = get_sym(symtab, sym_index);
++                //REL_PC_CALL_R_2(sym, get_sym, symtab, sym_index);
                  if(!sym)
                      break;
                  *reloc_addr = enclave_base + sym->st_value + (uintptr_t)rela->r_addend;
@@ -1023,7 +1357,8 @@ index 1d5c233b..09c47860 100644
 -                sym = get_sym(symtab, ELF64_R_SYM(rela->r_info));
 +            case R_X86_64_DTPOFF64: {
 +                size_t sym_index = ELF64_R_SYM(rela->r_info);
-+                REL_PC_CALL_R_2(sym, get_sym, symtab, sym_index);
++                sym = get_sym(symtab, sym_index);
++                //REL_PC_CALL_R_2(sym, get_sym, symtab, sym_index);
                  if(!sym)
                      break;
                  *reloc_addr = sym->st_value + (uintptr_t)rela->r_addend;
@@ -1034,7 +1369,8 @@ index 1d5c233b..09c47860 100644
 -                sym = get_sym(symtab, ELF64_R_SYM(rela->r_info));
 +            case R_X86_64_TPOFF64: {
 +                size_t sym_index = ELF64_R_SYM(rela->r_info);
-+                REL_PC_CALL_R_2(sym, get_sym, symtab, sym_index);
++                sym = get_sym(symtab, sym_index);
++                //REL_PC_CALL_R_2(sym, get_sym, symtab, sym_index);
                  if(!sym)
                      break;
  
@@ -1042,8 +1378,8 @@ index 1d5c233b..09c47860 100644
 +                int ret;
 +                void* base = (void *)enclave_base;
 +                size_t *ptr = &aligned_virtual_size;
-+
-+                REL_PC_CALL_R_2(ret, elf_tls_aligned_virtual_size, base, ptr);
++                ret = elf_tls_aligned_virtual_size(base, ptr);
++                //REL_PC_CALL_R_2(ret, elf_tls_aligned_virtual_size, base, ptr);
 +
 +                if ((0 == ret) && (aligned_virtual_size))
                  {
@@ -1056,19 +1392,20 @@ index 1d5c233b..09c47860 100644
  
              case R_X86_64_NONE:
                  break;
-@@ -228,7 +317,10 @@ do {                                                        \
+@@ -228,7 +320,11 @@ do {                                                        \
          if (rel_entry_sz == 0)                              \
              return -1;                                      \
          n = total_sz/rel_entry_sz;                          \
 -        if (do_relocs((ElfW(Addr))base_addr, rel_offset, sym_offset, n)) \
 +        int ret;                                            \
 +        ElfW(Addr) base = (ElfW(Addr))base_addr;            \
-+        REL_PC_CALL_R_4(ret, do_relocs, base, rel_offset, sym_offset, n); \
++        ret = do_relocs(base, rel_offset, sym_offset, n);   \
++        /*REL_PC_CALL_R_4(ret, do_relocs, base, rel_offset, sym_offset, n);*/ \
 +        if (ret)                                            \
              return -1;                                      \
      }                                                       \
  } while (0)
-@@ -244,9 +336,14 @@ do {                                                        \
+@@ -244,9 +340,14 @@ do {                                                        \
  __attribute__ ((visibility ("hidden")))
  int relocate_enclave(void* enclave_base)
  {
@@ -1079,12 +1416,12 @@ index 1d5c233b..09c47860 100644
      ElfW(Ehdr) *ehdr = (ElfW(Ehdr)*)enclave_base;
 -    ElfW(Phdr) *phdr = get_phdr(ehdr);
 +    ElfW(Phdr) *phdr;
-+
-+    REL_PC_CALL_R_1(phdr, get_phdr, ehdr);
++    phdr = get_phdr(ehdr);
++    //REL_PC_CALL_R_1(phdr, get_phdr, ehdr);
  
      if (phdr == NULL)
          return -1;  /* Invalid image. */
-@@ -344,6 +441,9 @@ int elf_tls_info(const void* enclave_base,
+@@ -344,6 +445,9 @@ int elf_tls_info(const void* enclave_base,
  static int elf_tls_aligned_virtual_size(const void *enclave_base,
                                          size_t *aligned_virtual_size)
  {
@@ -1576,7 +1913,7 @@ index eb3fe730..04cd538c 100644
      //OCALL for MKTCS
      ret = sgx_ocall(0, tcs);
 diff --git a/sdk/trts/trts_ecall.cpp b/sdk/trts/trts_ecall.cpp
-index d0791329..e231dc73 100644
+index d0791329..407926b0 100644
 --- a/sdk/trts/trts_ecall.cpp
 +++ b/sdk/trts/trts_ecall.cpp
 @@ -114,9 +114,10 @@ static sgx_status_t get_func_addr(uint32_t ordinal, void **addr)
@@ -1588,7 +1925,7 @@ index d0791329..e231dc73 100644
 -    if(!sgx_is_within_enclave(*addr, 0))
 +    void *ecall_addr = const_cast<void *>(g_ecall_table.ecall_table[ordinal].ecall_addr);
 +    *addr = ecall_addr;
-+    ecall_addr = (void*)((uint64_t)ecall_addr - get_real_enclave_base());
++    //ecall_addr = (void*)((uint64_t)ecall_addr - get_real_enclave_base());
 +    if(!sgx_is_within_enclave(ecall_addr, 0))
      {
          return SGX_ERROR_UNEXPECTED;
@@ -1680,10 +2017,10 @@ index f9536772..ad4c2795 100644
  }
  #endif
 diff --git a/sdk/trts/trts_nsp.cpp b/sdk/trts/trts_nsp.cpp
-index a3445130..a6a01b75 100644
+index a3445130..948fc00d 100644
 --- a/sdk/trts/trts_nsp.cpp
 +++ b/sdk/trts/trts_nsp.cpp
-@@ -75,30 +75,47 @@ extern "C" int enter_enclave(int index, void *ms, void *tcs, int cssa) __attribu
+@@ -75,30 +75,50 @@ extern "C" int enter_enclave(int index, void *ms, void *tcs, int cssa) __attribu
  
  extern "C" int enter_enclave(int index, void *ms, void *tcs, int cssa)
  {
@@ -1695,7 +2032,8 @@ index a3445130..a6a01b75 100644
  
 -    if(sgx_is_enclave_crashed())
 +    int state;
-+    REL_PC_CALL_R_0(state, get_enclave_state);
++    state = get_enclave_state();
++    //REL_PC_CALL_R_0(state, get_enclave_state);
 +
 +
 +    if(state == ENCLAVE_CRASHED)
@@ -1707,14 +2045,16 @@ index a3445130..a6a01b75 100644
      {
 -        set_enclave_state(ENCLAVE_CRASHED);
 +        state = ENCLAVE_CRASHED;
-+        REL_PC_CALL_1(set_enclave_state, state);
++        set_enclave_state(state);
++        //REL_PC_CALL_1(set_enclave_state, state);
 +        
 +        //SET_ENCLAVE_STATE(state);
          return error;
      }
  
 +    if(cssa == 0 && index == ECMD_INIT_ENCLAVE) {
-+        REL_PC_CALL_R_2(error, do_init_enclave, ms, tcs);
++        error = do_init_enclave(ms, tcs);
++        ///REL_PC_CALL_R_2(error, do_init_enclave, ms, tcs);
 +    }
 +    else 
      if(cssa == 0)
@@ -1737,13 +2077,14 @@ index a3445130..a6a01b75 100644
          else if(index == ECMD_ORET)
          {
              error = do_oret(ms);
-@@ -122,7 +139,8 @@ extern "C" int enter_enclave(int index, void *ms, void *tcs, int cssa)
+@@ -122,7 +142,9 @@ extern "C" int enter_enclave(int index, void *ms, void *tcs, int cssa)
      }
      if(error == SGX_ERROR_UNEXPECTED)
      {
 -        set_enclave_state(ENCLAVE_CRASHED);
 +        state = ENCLAVE_CRASHED;
-+        REL_PC_CALL_1(set_enclave_state, state);
++        set_enclave_state(state);
++        //REL_PC_CALL_1(set_enclave_state, state);
      }
      return error;
  }

@@ -2,7 +2,8 @@
 #![feature(option_result_contains)]
 #![feature(iter_partition_in_place)]
 
-use num_derive::FromPrimitive;
+
+use num_derive::FromPrimitive;    
 use num_traits::FromPrimitive;
 use std::fs::File;
 use std::io::prelude::*;
@@ -11,8 +12,9 @@ use std::ffi::CStr;
 use itertools::Itertools;
 use std::path::Path;
 use regex::Regex;
+use std::env;
 
-// definitions of classical ELF structs
+
 #[repr(C)]
 #[derive(Debug)]
 struct Elf64_Ehdr {
@@ -127,6 +129,7 @@ struct Elf64_Rela {
     r_addend : i64
 }
 
+
 #[repr(C)]
 #[derive(Debug)]
 struct Elf64_Rel {
@@ -163,46 +166,40 @@ enum Elf64SymType {
 #[derive(Debug)]
 #[allow(non_camel_case_types)]
 enum Elf64ShdrFlags {
-    SHF_WRITE = 0x1,
-    SHF_ALLOC = 0x2,
-    SHF_EXECINSTR = 0x4,
-    SHF_MERGE = 0x10,
-    SHF_STRINGS = 0x20,
-    SHF_INFO_LINK = 0x40,
-    SHF_LINK_ORDER = 0x80,
-    SHF_OS_NONCONFORMING = 0x100,
-    SHF_GROUP = 0x200,
-    SHF_MASKOS = 0x0ff00000,
-    SHF_ORDERED = 0x40000000,
-    SHF_EXCLUDE = 0x80000000,
-    SHF_MASKPROC = 0xf0000000 
+SHF_WRITE=0x1,
+SHF_ALLOC=0x2,
+SHF_EXECINSTR=0x4,
+SHF_MERGE=0x10,
+SHF_STRINGS=0x20,
+SHF_INFO_LINK=0x40,
+SHF_LINK_ORDER=0x80,
+SHF_OS_NONCONFORMING=0x100,
+SHF_GROUP=0x200,
+SHF_MASKOS=0x0ff00000,
+SHF_ORDERED=0x40000000,
+SHF_EXCLUDE=0x80000000,
+SHF_MASKPROC=0xf0000000 
 }
 
 impl Elf64_Sym {
     fn is_func(&self) -> bool{
         self.get_type() == (Elf64SymType::STT_FUNC as u8)
     }
-
     fn is_object(&self) -> bool {
         self.get_type() == (Elf64SymType::STT_OBJECT as u8)
     }
-
     fn is_no_type(&self) -> bool {
         self.get_type() == (Elf64SymType::STT_NOTYPE as u8)
     }
-
     fn is_section(&self) -> bool {
         self.get_type() == (Elf64SymType::STT_SECTION as u8)
     }
-
     fn get_type(&self) -> u8 {
         self.st_info & 0xF
     }
-
     fn get_binding(&self) -> u8 {
         self.st_info >> 4
     }
-
     fn is_text(&self, shdrs_copy : &Vec<Elf64_Shdr>) -> bool {
         if !self.is_section() { return false; }
 
@@ -212,7 +209,6 @@ impl Elf64_Sym {
 
         is_exec != 0
     }
-
     fn is_undefined<'a>(
         &self, 
         symbol_table : &'a ElfSymTab<'a>,
@@ -265,7 +261,6 @@ impl Elf64_Rela {
         let symbol = self.get_symbol(&symbol_tab)?;
         symbol_names.get_symbol_name(symbol)
     }
-
     fn get_symbol_from_addend<'a>(
         &self,
         symbol_tab : &'a ElfSymTab<'a>
@@ -273,6 +268,7 @@ impl Elf64_Rela {
         if self.r_info_type != RelaType::R_X86_64_RELATIVE as u32 {
             return None;
         }
+        // pos = symbol_tab.symbols.iter().position(|sym| sym.st_value == self.r_addend as u64)?;
         symbol_tab.symbols.iter().find(|sym| sym.st_value == self.r_addend as u64)
     }
 }
@@ -303,7 +299,6 @@ impl<'a> ElfStringTab<'a> {
             // convert raw poiter to string
             .and_then(|slice| unsafe{ CStr::from_ptr(slice.as_ptr().cast()) }.to_str().ok() )
     }
-
     fn get_strings(&'a self) -> Vec<&'a str> {
         // split section by nullbytes
         self.raw.split_inclusive(|&x| x == 0)
@@ -312,14 +307,12 @@ impl<'a> ElfStringTab<'a> {
             // remove error strings
             .flatten().collect()
     }
-
     fn get_symbol_name(&'a self, symbol : &Elf64_Sym) -> Option<&'a str> {
         if symbol.st_name == 0 {
             return None;
         }
         self.get_string(symbol.st_name)
     }
-
     fn get_section_name(&'a self, header : &Elf64_Shdr) -> Option<&'a str> {
         if self.contains_section_headers() {
             self.get_string(header.sh_name)
@@ -327,12 +320,10 @@ impl<'a> ElfStringTab<'a> {
             None
         }
     }
-
     fn contains_section_headers(&'a self) -> bool {
         let name = self.get_string(self.header.sh_name);
         name.contains(&".strtab") || name.contains(&".shstrtab")
     }
-
     fn print(&'a self) {
         println!("{:?} {} \t{}", self.header, self.shdr_index, self.get_strings().iter().format("\n\t"));
     }
@@ -352,64 +343,47 @@ impl<'a> ElfRelocations<'a> {
             RelaType::R_X86_64_32S as u32, 
             RelaType::R_X86_64_16 as u32,
             RelaType::R_X86_64_8 as u32,
+            //RelaType::R_X86_64_PC32 as u32,
+            //RelaType::R_X86_64_RELATIVE as u32
         ];
 
+        /*if self.is_eh_frame(&symbol_table, &string_tables) {
+                println!("found eh frame!");
+        }*/
+
         for rela in self.relocations.iter_mut() {
+
+            /*let sym = rela.get_symbol(&symbol_table);
+            if !sym.is_none() {
+                let sym = sym.unwrap();
+                let name : Vec<String> = string_tables.iter().filter_map(|x| x.get_symbol_name(&sym)).map(|x| x.to_string()).collect();
+                //let found = name.iter().find(|x| x == &"g_cpu_core_num");
+                //if found.is_some() {
+                //eprintln!("replacing {:?}", name)
+                //}
+            }*/
+
             if !to_replace.contains(&rela.r_info_type) {
                 continue;
             }
 
-            let sym = rela.get_symbol(&symbol_table);
-            if sym.is_none() {
-                continue;
-            }
-            let sym = sym.unwrap();
-
-            if sym.is_text(&shdrs_copy) || sym.is_func() || sym.is_undefined(&symbol_table, &string_tables) {
-                continue;
-            }
-
-            /*if sym.is_no_type() {
-                continue;
-            }*/
-            
-            let name : Vec<String> = string_tables.iter()
-                .filter_map(|x| x.get_symbol_name(&sym)).map(|x| x.to_string()).collect();
-
             rela.r_info_type = RelaType::R_X86_64_COPY as u32;
-            println!("addend: {}", rela.r_addend);
-            
-            if !name.is_empty() {
-                println!("replacing {:?}", name)
-            }
-            
         }
-        for rela in self.relocations.iter_mut() {
-            if RelaType::R_X86_64_RELATIVE as u32 != rela.r_info_type {
-                continue;
-            }
+    }
 
-            let sym = rela.get_symbol_from_addend(&symbol_table);
-            if sym.is_none() {
-                continue;
-            }
-            let sym = sym.unwrap();
+    fn is_eh_frame(
+        &'a self, 
+        symbol_tab : &'a ElfSymTab<'a>, 
+        symbol_names : &'a Vec<ElfStringTab<'a>>
+    ) -> bool {
+        let section_name = symbol_names.iter()
+                .find(|st| st.contains_section_headers())
+                .and_then(|st| st.get_section_name(self.header));
 
-            if sym.is_text(&shdrs_copy) || sym.is_func() || sym.is_undefined(&symbol_table, &string_tables) {
-                continue;
-            }
-
-            /*if sym.is_no_type() {
-                continue;
-            }*/
-            
-            let name : Vec<String>= string_tables.iter()
-                .filter_map(|x| x.get_symbol_name(&sym)).map(|x| x.to_string()).collect();
-            
-            rela.r_info_type = RelaType::R_X86_64_COPY as u32;
-            if !name.is_empty() {
-                println!("replacing {:?}", name)
-            }
+        if let Some(name) = section_name {
+                return name.contains("eh_frame");
+        } else {
+                return false;
         }
     }
 
@@ -422,10 +396,8 @@ impl<'a> ElfRelocations<'a> {
             .find(|st| st.contains_section_headers())
             .and_then(|st| st.get_section_name(self.header))
             .unwrap_or("UNKOWN!");
-
         println!("{}", section_name);
         for rela in self.relocations.iter() {
-
             let rela_description = RelaType::from_u32(rela.r_info_type)
                 .map(|x| format!("{:<20?} {:<10}", x, x.explain()) )
                 .unwrap_or(format!("{:<20} UNKNOWN!!!", rela.r_info_type));
@@ -435,7 +407,6 @@ impl<'a> ElfRelocations<'a> {
                     .filter_map(|st| st.get_symbol_name(sym))
                     .map(|x| format!("{} {:>10}", sym.st_info & 0xF, x))
                     .collect()
-
             } else {
                 Vec::new()
             };
@@ -525,6 +496,8 @@ fn convert_raw_to_elf<'a>(buf : &'a mut Vec<u8>) -> Option<ElfFile<'a>> {
     let mut sections : Vec<ElfSection<'a>> = shdrs.iter_mut().enumerate().filter_map(|(i, shdr)| {
         let names = ["SHT_NULL ","SHT_PROGBITS ","SHT_SYMTAB ","SHT_STRTAB ","SHT_RELA ","SHT_HASH ","SHT_DYNAMIC ","SHT_NOTE ","SHT_NOBITS ","SHT_REL ","SHT_SHLIB ","SHT_DYNSYM "];
 
+        //println!("{:2}: {:>10?} {:?}", i, names.get(shdr.sh_type as usize), shdr);
+
         shdrs_copy.push(shdr.clone());
 
         match shdr.sh_type {
@@ -556,7 +529,6 @@ fn convert_raw_to_elf<'a>(buf : &'a mut Vec<u8>) -> Option<ElfFile<'a>> {
         }
     }).collect();
 
-
     let mut string_tables : Vec<ElfStringTab<'a>> = vec![];
     let mut relocation_sections : Vec<ElfRelocations<'a>> = vec![];
     let mut symbol_tables : Option<ElfSymTab<'a>> = None;
@@ -568,7 +540,8 @@ fn convert_raw_to_elf<'a>(buf : &'a mut Vec<u8>) -> Option<ElfFile<'a>> {
             ElfSection::RelocationSection(x) => relocation_sections.push(x),
         }
     }
-   
+
+
     Some(ElfFile{
         shdrs_copy : shdrs_copy,
         elf_header : ehdr,
@@ -614,50 +587,37 @@ fn run(input_file_name : &str, output_file_name : &str, verbose : bool) -> Resul
 }
 
 fn main() {
-    let matches = App::new("relocator")
-        .setting(AppSettings::AllowExternalSubcommands)
-        .version("0.1.0")
-        .author("")
-        .about("")
-        .arg(Arg::with_name("input")
-            .short("i")
-            .long("input")
-            .takes_value(true)
-            .help("intput elf file name")
-        )
-        .arg(Arg::with_name("output")
-            .short("o")
-            .long("output")
-            .takes_value(true)
-            .help("output elf file name")
-        )
-        .arg(Arg::with_name("verbose")
-            .short("v")
-            .long("verbose")
-            .help("print details")
-        )
-        .get_matches();
+    let args: Vec<String> = env::args().collect();
+    //eprintln!("args: {:?}\n\n", args);
 
-    match matches.subcommand() {
-        (sub_cmd, Some(y) ) => {
-            let args = &y.args[""].vals;
-            let output = args.iter().position(|x| x == "-o");
-            if let Some(index) = output {
-                let output_name = args.get(index+1)
-                    .and_then(|x| x.to_str());
+    let has_o = args.iter().position(|x| x == "-o");
+    let has_input = args.iter().position(|x| x == "-input");
+    let has_output = args.iter().position(|x| x == "-output");
 
-                if let Some(x) = output_name {
-                    println!("using raw input {}", x);
-                    match run(x, x, false) {
-                        Ok(()) => println!("SUCCESSFULL!"),
-                        Err(x) => println!("FAILED! {:?}", x),
-                    };
-                }
-            }
-        },
+    if let Some(index) = has_o {
+        let output_name = args.get(index+1);
 
-        (_, _) => {
+        if let Some(x) = output_name {
+            //eprintln!("using raw input {}", x);
+            match run(x, x, false) {
+                Ok(()) => println!("SUCCESSFULL!"),
+                Err(x) => println!("FAILED! {:?}", x),
+            };
+        }
+
+    } else if let Some(input_index) = has_input {
+        let input = args.get(input_index+1);
+
+        if let Some(output_index) = has_output {
+            let output = args.get(output_index+1);
             
-        },
-    };
+            match run(input.unwrap(), output.unwrap(), false) {
+                Ok(()) => println!("SUCCESSFULL!"),
+                Err(x) => println!("FAILED! {:?}", x),
+            };
+        }
+    } else {
+        eprintln!("dr: cannot determine the input file!!!");
+    }
+
 }

@@ -1,3 +1,17 @@
 #!/bin/bash
 DIR=`dirname "$0"`
-$DIR/llvm11/build/bin/clang++ -flvi-null -mllvm -x86-enable-lvi-null -mcmodel=large $@ -fno-pic
+
+args=$@
+args_no_pic=${args//-fPIC/ }
+
+# this is a workarround for autoconf tests
+is_autoconf=`echo "$args" | grep "\bconftest\b" | wc -l`
+
+if [[ $is_autoconf -gt 0 ]] 
+then
+  echo "detected autoconf!"
+  $DIR/llvm11/build/bin/clang++ $args
+else
+  $DIR/llvm11/build/bin/clang++ -mllvm -x86-enable-lvi-null $args_no_pic
+  $DIR/relocator $args_no_pic
+fi

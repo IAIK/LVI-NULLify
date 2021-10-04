@@ -157,10 +157,10 @@ index 91ba4e3d0..43bdb3a13 100644
  enum : unsigned {
 diff --git a/llvm/lib/Target/X86/X86LVINullMitigation.cpp b/llvm/lib/Target/X86/X86LVINullMitigation.cpp
 new file mode 100644
-index 000000000..a6e27500f
+index 000000000..58dd89a28
 --- /dev/null
 +++ b/llvm/lib/Target/X86/X86LVINullMitigation.cpp
-@@ -0,0 +1,833 @@
+@@ -0,0 +1,897 @@
 +//===-- X86LoadValueInjectionNULLHardening.cpp - LVI NULL hardening for x86 --==//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -219,6 +219,7 @@ index 000000000..a6e27500f
 +#include "llvm/IR/Function.h"
 +#include "llvm/Support/Debug.h"
 +#include <bitset>
++#include <string>
 +
 +using namespace llvm;
 +
@@ -243,6 +244,10 @@ index 000000000..a6e27500f
 +static cl::opt<bool> EnableLVINullMitigation(
 +    "x86-enable-lvi-null", cl::NotHidden,
 +    cl::desc("X86: Enable LVI-NULL mitigations in the backend."), cl::init(false));
++
++static cl::opt<bool> EnableExperimentalInlineAsmFix(
++    "x86-lvi-null-fix-inline-asm", cl::NotHidden,
++    cl::desc("X86: LVI-NULL mitigations try to fix inline assembly."), cl::init(false));
 +
 +STATISTIC(NumCalls, "Number of calls modified for LVI-NULL mitigation");
 +STATISTIC(NumPush, "Number of push instructions modified for LVI-NULL mitigation");
@@ -386,12 +391,16 @@ index 000000000..a6e27500f
 +  // erase the instruction pointed by MI ... MI now points to the instruction after the one erased
 +  MI = MBB.erase_instr(&(*MI));
 +  
-+  // first, we adjust the stack
-+  BuildMI(MBB, MI, debug_location, TII->get(X86::SUB64ri32), X86::RSP).addReg(X86::RSP).addImm(8);
-+  
-+  // then we save our used register on the stack
-+  addSegmentedMem(BuildMI(MBB, MI, debug_location, TII->get(X86::MOV64mr)), X86::GS, X86::RSP, 0).addReg(used_reg);
-+
++  if (used_reg == X86::RSP) {
++    addSegmentedMem(BuildMI(MBB, MI, debug_location, TII->get(X86::MOV64mr)), X86::GS, X86::RSP, -8).addReg(used_reg);
++    BuildMI(MBB, MI, debug_location, TII->get(X86::SUB64ri32), X86::RSP).addReg(X86::RSP).addImm(8);
++  } else {
++    // first, we adjust the stack
++    BuildMI(MBB, MI, debug_location, TII->get(X86::SUB64ri32), X86::RSP).addReg(X86::RSP).addImm(8);
++    
++    // then we save our used register on the stack
++    addSegmentedMem(BuildMI(MBB, MI, debug_location, TII->get(X86::MOV64mr)), X86::GS, X86::RSP, 0).addReg(used_reg);
++  }
 +  NumPush++;
 +
 +  // adjust the iterator
@@ -487,8 +496,12 @@ index 000000000..a6e27500f
 +  // first, we restore our value from the stack
 +  addSegmentedMem(BuildMI(MBB, MI, debug_location, TII->get(X86::MOV64rm), used_reg), X86::GS, X86::RSP, 0);
 +
-+  // then we adjust the stack
-+  BuildMI(MBB, MI, debug_location, TII->get(X86::ADD64ri8), X86::RSP).addReg(X86::RSP).addImm(8);
++  // only adjust RSP if we not currently poped RSP
++  if (used_reg != X86::RSP) {
++    // then we adjust the stack
++    BuildMI(MBB, MI, debug_location, TII->get(X86::ADD64ri8), X86::RSP).addReg(X86::RSP).addImm(8);
++  }
++
 +  NumPop++;
 +
 +  // adjust the iterator
@@ -853,6 +866,51 @@ index 000000000..a6e27500f
 +  return true;
 +}
 +
++bool fixInlineAssembly(MachineBasicBlock &MBB, const X86InstrInfo *TII, MachineBasicBlock::iterator &MI) {
++  if (!EnableExperimentalInlineAsmFix) {
++    return false;
++  }
++  
++  LLVM_DEBUG(dbgs() << "I'm eliminating inline asm instructions\n");
++
++  // copy pase from somewhere, to get the asm string
++  // Count the number of register definitions to find the asm string.
++  unsigned NumDefs = 0;
++  for (; MI->getOperand(NumDefs).isReg() && MI->getOperand(NumDefs).isDef();
++      ++NumDefs)
++  assert(NumDefs != MI->getNumOperands()-2 && "No asm string?");
++  assert(MI->getOperand(NumDefs).isSymbol() && "No asm string?");
++
++  std::string str{ MI->getOperand(NumDefs).getSymbolName() };
++
++  using namespace std::string_literals;
++
++  auto debug_location = MI->getDebugLoc();
++
++  if (str == "push %rsp"s) {
++    MI = MBB.erase_instr(&(*MI));
++    BuildMI(MBB, MI, debug_location, TII->get(X86::PUSH64r)).addReg(X86::RSP);
++    MI--;
++    MI--;
++    return true;
++
++  } else if (str == "pop %rsp"s) {
++    MI = MBB.erase_instr(&(*MI));
++    BuildMI(MBB, MI, debug_location, TII->get(X86::POP64r)).addReg(X86::RSP);
++    MI--;
++    MI--;
++    return true;
++  } else if (str == "ret"s) {
++    MI = MBB.erase_instr(&(*MI));
++    BuildMI(MBB, MI, debug_location, TII->get(X86::RETQ));
++    MI--;
++    MI--;
++    return true;
++  }
++
++  return false;
++}
++
 +bool mitigateLVI(const X86Subtarget *Subtarget, const Function &F, MachineFunction &MF) {
 +  const X86RegisterInfo *TRI = Subtarget->getRegisterInfo();
 +  const X86InstrInfo *TII = Subtarget->getInstrInfo();
@@ -916,6 +974,12 @@ index 000000000..a6e27500f
 +        case X86::TAILJMPm64:
 +        case X86::JMP64m:
 +          Modified |= eliminateJumpMemory(MBB, TII, MI);
++          break;
++        
++        // for the POCs we fix a subset of inline assembly statements
++        // this subset is not complete and left for future work
++        case TargetOpcode::INLINEASM:
++          Modified |= fixInlineAssembly(MBB, TII, MI);
 +          break;
 +
 +        // Everything else which uses a memory operand

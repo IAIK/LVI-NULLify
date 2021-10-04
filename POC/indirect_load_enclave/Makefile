@@ -40,7 +40,7 @@ SGX_DEBUG ?= 1
 GS?=0
 
 ifeq ($(GS), 1)
-	SGX_SDK = $(dir $(abspath $(firstword $(MAKEFILE_LIST))))/../../benchmarks/clang-gs/sgxsdk
+	SGX_SDK = $(dir $(abspath $(firstword $(MAKEFILE_LIST))))/../../SDKs/clang-gs/sgxsdk
 else
 	SGX_SDK = /opt/intel/sgxsdk
 endif

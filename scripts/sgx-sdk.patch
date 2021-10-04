@@ -1,0 +1,2097 @@
+diff --git a/Makefile b/Makefile
+index 5fb368a9..dd365e8c 100644
+--- a/Makefile
++++ b/Makefile
+@@ -98,6 +98,10 @@ sdk_install_pkg: sdk
+ psw_install_pkg: psw
+ 	./linux/installer/bin/build-installpkg.sh psw
+ 
++.PHONY: deb_psw_pkg_minimal
++deb_psw_pkg_minimal: deb_sgx_aesm_service deb_libsgx_epid deb_libsgx_launch deb_libsgx_quote_ex deb_libsgx_uae_service deb_libsgx_enclave_common deb_libsgx_urts
++	./linux/installer/common/local_repo_builder/local_repo_builder.sh debian build
++
+ .PHONY: deb_libsgx_ae_qe3
+ deb_libsgx_ae_qe3:
+ ifeq ("$(wildcard ./external/dcap_source/QuoteGeneration/psw/ae/data/prebuilt/libsgx_qe3.signed.so)", "")
+diff --git a/buildenv.mk b/buildenv.mk
+index 331611d7..b76d1c06 100644
+--- a/buildenv.mk
++++ b/buildenv.mk
+@@ -67,6 +67,10 @@ NIPD := .nipd
+ NIPRODT := .niprod
+ CC ?= gcc
+ 
++#compiler for trusted sdk part
++TR_CC ?= $(ROOT_DIR)/../compiler/clang-gs
++TR_CXX ?= $(ROOT_DIR)/../compiler/clang-gs++
++
+ # clean the content of 'INCLUDE' - this variable will be set by vcvars32.bat
+ # thus it will cause build error when this variable is used by our Makefile,
+ # when compiling the code under Cygwin tainted by MSVC environment settings.
+@@ -113,10 +117,10 @@ COMMON_FLAGS += -ffunction-sections -fdata-sections
+ COMMON_FLAGS += -Wall -Wextra -Winit-self -Wpointer-arith -Wreturn-type \
+ 		-Waddress -Wsequence-point -Wformat-security \
+ 		-Wmissing-include-dirs -Wfloat-equal -Wundef -Wshadow \
+-		-Wcast-align -Wconversion -Wredundant-decls
++		-Wcast-align -Wconversion -Wredundant-decls -Wno-sign-conversion
+ 
+ # additional warnings flags for C
+-CFLAGS += -Wjump-misses-init -Wstrict-prototypes -Wunsuffixed-float-constants
++CFLAGS += -Wstrict-prototypes
+ 
+ # additional warnings flags for C++
+ CXXFLAGS += -Wnon-virtual-dtor
+@@ -196,6 +200,14 @@ else ifeq ($(MITIGATION-CVE-2020-0551), CF)
+     MITIGATION_LIB_PATH := cve_2020_0551_cf
+ endif
+ 
++# temp fix for sdk
++
++#ifeq ($(TR_CC), clang)
++MITIGATION_C = 0
++MITIGATION_ASM = 0
++#endif
++
++
+ ifneq ($(origin NIX_PATH), environment)
+ BINUTILS_DIR = /usr/local/bin
+ else
+@@ -240,10 +252,10 @@ MITIGATION_CFLAGS += $(MITIGATION_ASFLAGS)
+ # When `pie' is enabled, the linker (both BFD and Gold) under Ubuntu 14.04
+ # will hide all symbols from dynamic symbol table even if they are marked
+ # as `global' in the LD version script.
+-ENCLAVE_CFLAGS   = -ffreestanding -nostdinc -fvisibility=hidden -fpie -fno-strict-overflow -fno-delete-null-pointer-checks
++ENCLAVE_CFLAGS   = -ffreestanding -nostdinc -fvisibility=hidden -fno-strict-overflow -fno-delete-null-pointer-checks
+ ENCLAVE_CXXFLAGS = $(ENCLAVE_CFLAGS) -nostdinc++
+ ENCLAVE_LDFLAGS  = -B$(BINUTILS_DIR) $(COMMON_LDFLAGS) -Wl,-Bstatic -Wl,-Bsymbolic -Wl,--no-undefined \
+-                   -Wl,-pie,-eenclave_entry -Wl,--export-dynamic  \
++                   -Wl,-eenclave_entry -Wl,--export-dynamic  \
+                    -Wl,--defsym,__ImageBase=0
+ 
+ ENCLAVE_CFLAGS += $(MITIGATION_CFLAGS)
+diff --git a/common/inc/internal/linux/linux-regs.h b/common/inc/internal/linux/linux-regs.h
+index 6279a9c1..4ec45c1c 100644
+--- a/common/inc/internal/linux/linux-regs.h
++++ b/common/inc/internal/linux/linux-regs.h
+@@ -164,6 +164,40 @@
+     pop     %xbp
+ .endm
+ 
++/* gs relative lvi fix */
++.macro GS_REL_PUSH reg
++    sub $8, %rsp
++    mov \reg, %gs:(%rsp)
++.endm
++
++.macro GS_REL_POP reg
++    mov %gs:(%rsp), \reg
++    add $8, %rsp
++.endm
++    
++.macro GS_REL_RET
++    mov %gs:(%rsp), %rcx
++    add $8, %rsp
++    jmp *%rcx
++.endm
++
++.macro GS_REL_LEAVE
++    mov %rbp, %rsp
++    GS_REL_POP %rbp
++.endm
++
++.macro GS_REL_CALL_SYMBOL name
++    lea 1f(%rip), %rax
++    sub $8, %rsp
++    mov %rax, %gs:(%rsp)
++    jmp \name
++1:
++.endm
++
++.macro GS_REL_GET_BASE reg
++    lea_pic __ImageBase, \reg
++.endm
++
+ /* `paramN' (N = 1,2,3,4) should be registers. */
+ .macro SET_PARAMS param1:req, param2, param3, param4
+ #if defined(LINUX32)
+@@ -275,4 +309,5 @@
+ #endif
+ .endm
+ 
++
+ #endif /* LINUX_REGS_H__ */
+diff --git a/common/inc/sgx_random_buffers.h b/common/inc/sgx_random_buffers.h
+index 1d54a385..36caa1be 100644
+--- a/common/inc/sgx_random_buffers.h
++++ b/common/inc/sgx_random_buffers.h
+@@ -90,7 +90,7 @@ R random_stack_advance(R(*f)(Ps...), Qs&&... args)
+     if (!EDMM_supported)
+         memset((void *)dummy_vla, 0, size);
+ #else
+-    (void)(dummy_vla);
++    asm volatile (""::"r"(dummy_vla):"memory");
+ #endif
+ 
+     return _random_stack_noinline_wrapper(f, std::forward<Qs>(args)...);
+@@ -275,7 +275,7 @@ private:
+         }
+     };
+ 
+-    char __bigger_[size()];
++    char __bigger_[size(1)];
+ };
+ 
+ template <class T, unsigned M = 0x1000>
+diff --git a/common/inc/sgx_trts.h b/common/inc/sgx_trts.h
+index ff000f9f..1ca6bab1 100644
+--- a/common/inc/sgx_trts.h
++++ b/common/inc/sgx_trts.h
+@@ -82,6 +82,9 @@ int SGXAPI sgx_is_enclave_crashed(void) __attribute__((section(".nipx")));
+ */
+ sgx_status_t SGXAPI sgx_read_rand(unsigned char *rand, size_t length_in_bytes);
+ 
++void * SGXAPI sgx_make_pointer_gs_relative(void *ptr);
++void * SGXAPI sgx_make_pointer_absolute(void *ptr);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/common/src/linux/xsave_gnu.S b/common/src/linux/xsave_gnu.S
+index 4ada7c0b..040932dd 100644
+--- a/common/src/linux/xsave_gnu.S
++++ b/common/src/linux/xsave_gnu.S
+@@ -95,12 +95,37 @@ DECLARE_LOCAL_FUNC restore_xregs
+     cmpl    $0, %eax
+     jz      1f
+     SET_XSAVE_MASK
+-    DO_XRSTOR
++    /*DO_XRSTOR*/
++    xrstor64 %gs:(%rcx)
+     jmp     2f
+ 1:
+-    DO_FXRSTOR
++    /* DO_FXRSTOR */
++    fxrstor64 %gs:(%rcx)
+ 2:
+-    ret
++    GS_REL_RET
++
++
++.section .nipx,"ax",@progbits
++DECLARE_LOCAL_FUNC restore_xregs_abs
++#if defined(LINUX32)
++    mov     SE_WORDSIZE(%esp), %ecx
++    lea     g_xsave_enabled, %eax
++#else
++    mov     %rdi, %rcx
++    lea_pic g_xsave_enabled, %rax
++#endif
++    movl    (%xax), %eax
++    cmpl    $0, %eax
++    jz      1f
++    SET_XSAVE_MASK
++    /*DO_XRSTOR*/
++    xrstor64 (%rcx)
++    jmp     2f
++1:
++    /* DO_FXRSTOR */
++    fxrstor64 (%rcx)
++2:
++    GS_REL_RET
+ 
+ DECLARE_LOCAL_FUNC save_xregs
+ #if defined(LINUX32)
+@@ -115,10 +140,11 @@ DECLARE_LOCAL_FUNC save_xregs
+     cmpl    $0, %eax
+     jz      1f
+     SET_XSAVE_MASK
+-    DO_XSAVEC
++    /* DO_XSAVEC */
++    xsavec64 %gs:(%rcx)
+     jmp     2f
+ 1:
+-    DO_FXSAVE
++    /* DO_FXSAVE */
++    fxsave64 %gs:(%rcx)
+ 2:
+-    ret
+-
++    GS_REL_RET
+diff --git a/external/dcap_source b/external/dcap_source
+index 4605fae1..96ea09b7 160000
+--- a/external/dcap_source
++++ b/external/dcap_source
+@@ -1 +1 @@
+-Subproject commit 4605fae1c606de4ff1191719433f77f050f1c33c
++Subproject commit 96ea09b72c52852be166ce21e435562e74f9966d
+diff --git a/external/dnnl/dnnl b/external/dnnl/dnnl
+index e1fe0eb8..52c3052d 160000
+--- a/external/dnnl/dnnl
++++ b/external/dnnl/dnnl
+@@ -1 +1 @@
+-Subproject commit e1fe0eb8119645778ea31bcd42b790b61f6b4577
++Subproject commit 52c3052df8ec1d5b8b45cb6c350a952840eabd42
+diff --git a/external/ippcp_internal/ipp-crypto b/external/ippcp_internal/ipp-crypto
+new file mode 160000
+index 00000000..415960b5
+--- /dev/null
++++ b/external/ippcp_internal/ipp-crypto
+@@ -0,0 +1 @@
++Subproject commit 415960b5844594d4e763ca4c246baaf399e342e2
+diff --git a/make_psw_debug.sh b/make_psw_debug.sh
+new file mode 100755
+index 00000000..e95b0ad2
+--- /dev/null
++++ b/make_psw_debug.sh
+@@ -0,0 +1,18 @@
++#!/bin/bash
++
++# chcek source list
++cat /etc/apt/sources.list
++
++# stop service 
++sudo /opt/intel/sgx-aesm-service/cleanup.sh
++
++# nuke everything!
++sudo apt remove sgx-aesm-service
++sudo apt remove '^libsgx_*'
++
++# remake
++make deb_psw_pkg_minimal DEBUG=1
++
++# install
++sudo apt update
++sudo apt install -y sgx-aesm-service libsgx-urts libsgx-urts-dbgsym
+\ No newline at end of file
+diff --git a/make_psw_release.sh b/make_psw_release.sh
+new file mode 100755
+index 00000000..95fa0746
+--- /dev/null
++++ b/make_psw_release.sh
+@@ -0,0 +1,18 @@
++#!/bin/bash
++
++# check source list
++cat /etc/apt/sources.list
++
++# stop service 
++sudo /opt/intel/sgx-aesm-service/cleanup.sh
++
++# nuke everything!
++sudo apt remove sgx-aesm-service
++sudo apt remove '^libsgx_*'
++
++# remake
++make deb_psw_pkg_minimal
++
++# install
++sudo apt update
++sudo apt install -y sgx-aesm-service libsgx-urts libsgx-urts-dbgsym
+\ No newline at end of file
+diff --git a/make_sdk_debug.sh b/make_sdk_debug.sh
+new file mode 100755
+index 00000000..63605a1c
+--- /dev/null
++++ b/make_sdk_debug.sh
+@@ -0,0 +1,4 @@
++#!/bin/bash
++make sdk_install_pkg_no_mitigation DEBUG=1
++sudo /opt/intel/sgxsdk/uninstall.sh
++printf 'no\n/opt/intel\n' | sudo linux/installer/bin/sgx_linux_x64_sdk_2.10.100.2.bin
+\ No newline at end of file
+diff --git a/make_sdk_release.sh b/make_sdk_release.sh
+new file mode 100755
+index 00000000..1ffaf3b2
+--- /dev/null
++++ b/make_sdk_release.sh
+@@ -0,0 +1,4 @@
++#!/bin/bash
++make sdk_install_pkg_no_mitigation
++sudo /opt/intel/sgxsdk/uninstall.sh
++printf 'no\n/opt/intel\n' | sudo linux/installer/bin/sgx_linux_x64_sdk_2.10.100.2.bin
+\ No newline at end of file
+diff --git a/psw/urts/loader.cpp b/psw/urts/loader.cpp
+index 66e9cc20..644175a8 100644
+--- a/psw/urts/loader.cpp
++++ b/psw/urts/loader.cpp
+@@ -401,7 +401,13 @@ int CLoader::build_context(const uint64_t start_rva, layout_entry_t *layout)
+                 tcs_t *ptcs = reinterpret_cast<tcs_t*>(added_page);
+                 ptcs->ossa += rva;
+                 ptcs->ofs_base += rva;
+-                ptcs->ogs_base += rva;
++
++                // enable gs relative lvi-null mitigation if product id is set
++                if ( ! (m_metadata && (m_metadata->enclave_css.body.isv_prod_id == 0xdead) ) ) {
++                    ptcs->ogs_base += rva;
++                }
++                
++                //se_trace(SE_TRACE_ERROR, "NOT SETTING GS IN build_context");
+                 if(!(attributes & PAGE_ATTR_EREMOVE))
+                 {
+                     m_tcs_list.push_back(std::make_pair(GET_PTR(tcs_t, m_start_addr, rva), false));
+diff --git a/sdk/Makefile.source b/sdk/Makefile.source
+index c0e682ae..4565e63c 100644
+--- a/sdk/Makefile.source
++++ b/sdk/Makefile.source
+@@ -72,7 +72,7 @@ components: tstdc tcxx tservice trts tcrypto tkey_exchange ukey_exchange tprotec
+ tstdc: $(LIBTLIBC)
+ 
+ $(LIBTLIBC): tlibthread compiler-rt tsafecrt tsetjmp tmm_rsrv
+-	$(MAKE) -C tlibc/ -j4 2> /dev/null
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C tlibc/ -j4 2> /dev/null
+ 	@$(MKDIR) $(BUILD_DIR)/.tlibc   $(BUILD_DIR)/.tlibthread $(BUILD_DIR)/.tsafecrt $(BUILD_DIR)/.tsetjmp $(BUILD_DIR)/.tmm_rsrv
+ 	@$(RM) -f $(BUILD_DIR)/.tlibc/*         && cd $(BUILD_DIR)/.tlibc      && $(AR) x $(LINUX_SDK_DIR)/tlibc/libtlibc.a
+ 	@$(RM) -f $(BUILD_DIR)/.tlibthread/*    && cd $(BUILD_DIR)/.tlibthread && $(AR) x $(LINUX_SDK_DIR)/tlibthread/libtlibthread.a
+@@ -91,23 +91,23 @@ $(LIBTLIBC): tlibthread compiler-rt tsafecrt tsetjmp tmm_rsrv
+ 
+ .PHONY: tlibthread
+ tlibthread:
+-	$(MAKE) -C tlibthread/
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C tlibthread/
+ 
+ .PHONY: tsafecrt
+ tsafecrt:
+-	$(MAKE) -C tsafecrt/
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C tsafecrt/
+ 
+ .PHONY: compiler-rt
+ compiler-rt:
+-	$(MAKE) -C compiler-rt/ 2> /dev/null
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C compiler-rt/ 2> /dev/null
+ 
+ .PHONY: tsetjmp
+ tsetjmp:
+-	$(MAKE) -C tsetjmp/
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C tsetjmp/
+ 
+ .PHONY: tmm_rsrv
+ tmm_rsrv:
+-	$(MAKE) -C tmm_rsrv/
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C tmm_rsrv/
+ 
+ # ---------------------------------------------------
+ #  pthread
+@@ -134,11 +134,11 @@ $(LIBTCXX): cpprt tlibcxx
+ 
+ .PHONY: cpprt
+ cpprt:
+-	$(MAKE) -C cpprt
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C cpprt
+ 
+ .PHONY: tlibcxx
+-tlibcxx: $(BUILD_DIR)
+-	$(MAKE) -C tlibcxx/ 2> /dev/null
++tlibcxx: $(BUILD_DIR)	
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C tlibcxx/ 2> /dev/null
+ 	$(CP) tlibcxx/README.sgx $(BUILD_DIR)/libc++_Changes_SGX.txt
+ 
+ # ---------------------------------------------------
+@@ -159,46 +159,46 @@ $(LIBTSE): selib tseal ec_dh_lib
+ 
+ .PHONY: selib
+ selib:
+-	$(MAKE) -C selib/linux/
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C selib/linux/
+ 
+ .PHONY: tseal
+ tseal:
+-	$(MAKE) -C tseal/linux/
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C tseal/linux/
+ 
+ .PHONY: ec_dh_lib
+ ec_dh_lib:
+-	$(MAKE) -C ec_dh_lib/
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C ec_dh_lib/
+ 
+ # ---------------------------------------------------
+ #  Other trusted libraries
+ # ---------------------------------------------------
+ .PHONY: trts
+ trts:
+-	$(MAKE) -C trts/
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C trts/
+ 
+ .PHONY: tcrypto
+ tcrypto: edger8r
+-	$(MAKE) -C tlibcrypto/
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C tlibcrypto/
+ 
+ .PHONY: tkey_exchange
+ tkey_exchange: edger8r
+-	$(MAKE) -C tkey_exchange
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C tkey_exchange
+ 
+ .PHONY: tcmalloc
+ tcmalloc:
+-	$(MAKE) -C gperftools/
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C gperftools/
+ 
+ .PHONY: tprotected_fs
+ tprotected_fs: edger8r
+-	$(MAKE) -C protected_fs/sgx_tprotected_fs
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C protected_fs/sgx_tprotected_fs
+ 
+ .PHONY: sgx_pcl
+ sgx_pcl:
+-	$(MAKE) -C protected_code_loader
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C protected_code_loader
+ 
+ .PHONY: openmp
+ openmp:
+-	$(MAKE) -C $(LINUX_EXTERNAL_DIR)/openmp
++	$(MAKE) CC=$(gcc) CXX=$(g++) -C $(LINUX_EXTERNAL_DIR)/openmp
+ # ---------------------------------------------------
+ #  Untrusted libraries
+ # ---------------------------------------------------
+diff --git a/sdk/cpprt/Makefile b/sdk/cpprt/Makefile
+index 835fa03b..8e407d4f 100644
+--- a/sdk/cpprt/Makefile
++++ b/sdk/cpprt/Makefile
+@@ -82,7 +82,7 @@ $(CPPRT): $(OBJS) prepare-libunwind libunwind
+ .PHONY: libunwind
+ libunwind:
+ 	cd $(LIBUNWIND_DIR)/ && \
+-		( test -f Makefile || CFLAGS="$(CFLAGS)" ./autogen.sh ) && \
++		( test -f Makefile || CFLAGS="$(CFLAGS)" CC=$(CC) CXX=$(CXX) ./autogen.sh ) && \
+ 		$(MAKE) -j5
+ 
+ 
+diff --git a/sdk/cpprt/linux/libunwind/include/libunwind_i.h b/sdk/cpprt/linux/libunwind/include/libunwind_i.h
+index ea983b82..3fa04205 100644
+--- a/sdk/cpprt/linux/libunwind/include/libunwind_i.h
++++ b/sdk/cpprt/linux/libunwind/include/libunwind_i.h
+@@ -54,6 +54,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.  */
+ #include <signal.h>
+ #endif
+ 
++#undef MB_LEN_MAX
+ #include <stdlib.h>
+ #include <string.h>
+ #include <unistd.h>
+diff --git a/sdk/cpprt/linux/libunwind/src/dwarf/Gfde.c b/sdk/cpprt/linux/libunwind/src/dwarf/Gfde.c
+index 9250b895..a690d07c 100644
+--- a/sdk/cpprt/linux/libunwind/src/dwarf/Gfde.c
++++ b/sdk/cpprt/linux/libunwind/src/dwarf/Gfde.c
+@@ -182,6 +182,15 @@ parse_cie (unw_addr_space_t as, unw_accessors_t *a, unw_word_t addr,
+         /* read the personality-routine pointer-encoding format.  */
+         if ((ret = dwarf_readu8 (as, a, &addr, &handler_encoding, arg)) < 0)
+           return ret;
++        
++        // since we use gs as base we only have diffs as addresses
++        // therefore we need to adapt the type of the eh_frame encoding for 
++        // the handler.
++        if ( (DW_EH_PE_uleb128 <= (handler_encoding & DW_EH_PE_FORMAT_MASK)) 
++          && ((handler_encoding & DW_EH_PE_FORMAT_MASK) <= DW_EH_PE_udata8) ) {
++          handler_encoding += 8; // convert encoding from unsigned to signed
++        }
++        
+         if ((ret = dwarf_read_encoded_pointer (as, a, &addr, handler_encoding,
+                                                pi, &dci->handler, arg)) < 0)
+           return ret;
+diff --git a/sdk/cpprt/linux/libunwind/src/dwarf/Gparser.c b/sdk/cpprt/linux/libunwind/src/dwarf/Gparser.c
+index ad89352b..be663452 100644
+--- a/sdk/cpprt/linux/libunwind/src/dwarf/Gparser.c
++++ b/sdk/cpprt/linux/libunwind/src/dwarf/Gparser.c
+@@ -28,6 +28,8 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.  */
+ #include <stddef.h>
+ #include <limits.h>
+ 
++extern unw_word_t get_real_enclave_base();
++
+ #define alloc_reg_state()       (mempool_alloc (&dwarf_reg_state_pool))
+ #define free_reg_state(rs)      (mempool_free (&dwarf_reg_state_pool, rs))
+ 
+@@ -864,7 +866,7 @@ apply_reg_state (struct dwarf_cursor *c, struct dwarf_reg_state *rs)
+     ret = dwarf_get (c, c->loc[rs->ret_addr_column], &ip);
+     if (ret < 0)
+       return ret;
+-    c->ip = ip;
++    c->ip = ip - get_real_enclave_base();
+     ret = 1;
+   }
+ 
+diff --git a/sdk/cpprt/linux/libunwind/src/x86_64/getcontext.S b/sdk/cpprt/linux/libunwind/src/x86_64/getcontext.S
+index 7a8b5664..59ffea2b 100644
+--- a/sdk/cpprt/linux/libunwind/src/x86_64/getcontext.S
++++ b/sdk/cpprt/linux/libunwind/src/x86_64/getcontext.S
+@@ -40,30 +40,30 @@ _Ux86_64_getcontext:
+ 	.cfi_startproc
+ 
+ 	/* Callee saved: RBX, RBP, R12-R15  */
+-	movq %r12, UC_MCONTEXT_GREGS_R12(%rdi)
+-	movq %r13, UC_MCONTEXT_GREGS_R13(%rdi)
+-	movq %r14, UC_MCONTEXT_GREGS_R14(%rdi)
+-	movq %r15, UC_MCONTEXT_GREGS_R15(%rdi)
+-	movq %rbp, UC_MCONTEXT_GREGS_RBP(%rdi)
+-	movq %rbx, UC_MCONTEXT_GREGS_RBX(%rdi)
++	movq %r12, %gs:UC_MCONTEXT_GREGS_R12(%rdi)
++	movq %r13, %gs:UC_MCONTEXT_GREGS_R13(%rdi)
++	movq %r14, %gs:UC_MCONTEXT_GREGS_R14(%rdi)
++	movq %r15, %gs:UC_MCONTEXT_GREGS_R15(%rdi)
++	movq %rbp, %gs:UC_MCONTEXT_GREGS_RBP(%rdi)
++	movq %rbx, %gs:UC_MCONTEXT_GREGS_RBX(%rdi)
+ 
+ 	/* Save argument registers (not strictly needed, but setcontext 
+ 	   restores them, so don't restore garbage).  */
+-	movq %r8,  UC_MCONTEXT_GREGS_R8(%rdi)
+-	movq %r9,  UC_MCONTEXT_GREGS_R9(%rdi)
+-	movq %rdi, UC_MCONTEXT_GREGS_RDI(%rdi)
+-	movq %rsi, UC_MCONTEXT_GREGS_RSI(%rdi)
+-	movq %rdx, UC_MCONTEXT_GREGS_RDX(%rdi)
+-	movq %rax, UC_MCONTEXT_GREGS_RAX(%rdi)
+-	movq %rcx, UC_MCONTEXT_GREGS_RCX(%rdi)
++	movq %r8,  %gs:UC_MCONTEXT_GREGS_R8(%rdi)
++	movq %r9,  %gs:UC_MCONTEXT_GREGS_R9(%rdi)
++	movq %rdi, %gs:UC_MCONTEXT_GREGS_RDI(%rdi)
++	movq %rsi, %gs:UC_MCONTEXT_GREGS_RSI(%rdi)
++	movq %rdx, %gs:UC_MCONTEXT_GREGS_RDX(%rdi)
++	movq %rax, %gs:UC_MCONTEXT_GREGS_RAX(%rdi)
++	movq %rcx, %gs:UC_MCONTEXT_GREGS_RCX(%rdi)
+ 
+ #if defined __linux__
+ 	/* Save fp state (not needed, except for setcontext not
+ 	   restoring garbage).  */
+ 	leaq UC_MCONTEXT_FPREGS_MEM(%rdi),%r8
+-	movq %r8, UC_MCONTEXT_FPREGS_PTR(%rdi)
+-	fnstenv (%r8)
+-	stmxcsr FPREGS_OFFSET_MXCSR(%r8)
++	movq %r8, %gs:UC_MCONTEXT_FPREGS_PTR(%rdi)
++	fnstenv %gs:(%r8)
++	stmxcsr %gs:FPREGS_OFFSET_MXCSR(%r8)
+ #elif defined __FreeBSD__
+ 	fxsave UC_MCONTEXT_FPSTATE(%rdi)
+ 	movq $UC_MCONTEXT_FPOWNED_FPU,UC_MCONTEXT_OWNEDFP(%rdi)
+@@ -90,14 +90,20 @@ _Ux86_64_getcontext:
+ #error Port me
+ #endif
+ 
+-	leaq 8(%rsp), %rax /* exclude this call.  */
+-	movq %rax, UC_MCONTEXT_GREGS_RSP(%rdi)
++	leaq %gs:8(%rsp), %rax /* exclude this call.  */
++	movq %rax, %gs:UC_MCONTEXT_GREGS_RSP(%rdi)
+ 
+-	movq 0(%rsp), %rax
+-	movq %rax, UC_MCONTEXT_GREGS_RIP(%rdi)
++	lea  __ImageBase(%rip), %rax
++	neg  %rax
++	add  %gs:0(%rsp), %rax 
++	movq %rax, %gs:UC_MCONTEXT_GREGS_RIP(%rdi)
+ 
+ 	xorq	%rax, %rax
+-	retq
++
++	mov   %gs:(%rsp), %rcx
++	add   $8, %rsp
++	jmp   *%rcx
++
+ 	.cfi_endproc
+ 	.size _Ux86_64_getcontext, . - _Ux86_64_getcontext
+ 
+@@ -116,17 +122,23 @@ _Ux86_64_getcontext_trace:
+ 	.cfi_startproc
+ 
+ 	/* Save only RBP, RBX, RSP, RIP - exclude this call. */
+-	movq %rbp, UC_MCONTEXT_GREGS_RBP(%rdi)
+-	movq %rbx, UC_MCONTEXT_GREGS_RBX(%rdi)
++	movq %rbp, %gs:UC_MCONTEXT_GREGS_RBP(%rdi)
++	movq %rbx, %gs:UC_MCONTEXT_GREGS_RBX(%rdi)
+ 
+-	leaq 8(%rsp), %rax
+-	movq %rax, UC_MCONTEXT_GREGS_RSP(%rdi)
++	leaq %gs:8(%rsp), %rax
++	movq %rax, %gs:UC_MCONTEXT_GREGS_RSP(%rdi)
+ 
+-	movq 0(%rsp), %rax
+-	movq %rax, UC_MCONTEXT_GREGS_RIP(%rdi)
++	lea  __ImageBase(%rip), %rax
++	neg  %rax
++	add  %gs:0(%rsp), %rax 
++	movq %rax, %gs:UC_MCONTEXT_GREGS_RIP(%rdi)
+ 
+ 	xorq	%rax, %rax
+-	retq
++
++	mov   %gs:(%rsp), %rcx
++	add   $8, %rsp
++	jmp   *%rcx
++	
+ 	.cfi_endproc
+ 	.size _Ux86_64_getcontext_trace, . - _Ux86_64_getcontext_trace
+ 
+diff --git a/sdk/cpprt/linux/libunwind/src/x86_64/setcontext.S b/sdk/cpprt/linux/libunwind/src/x86_64/setcontext.S
+index 358217de..d9f3fe57 100644
+--- a/sdk/cpprt/linux/libunwind/src/x86_64/setcontext.S
++++ b/sdk/cpprt/linux/libunwind/src/x86_64/setcontext.S
+@@ -39,9 +39,9 @@ _Ux86_64_setcontext:
+ 
+ #if defined __linux__
+         /* restore fp state */
+-	mov    UC_MCONTEXT_FPREGS_PTR(%rdi),%r8
+-	fldenv (%r8)
+-	ldmxcsr FPREGS_OFFSET_MXCSR(%r8)
++	mov    %gs:UC_MCONTEXT_FPREGS_PTR(%rdi),%r8
++	fldenv %gs:(%r8)
++	ldmxcsr %gs:FPREGS_OFFSET_MXCSR(%r8)
+ #elif defined __FreeBSD__
+ 	/* restore fp state */
+ 	cmpq $UC_MCONTEXT_FPOWNED_FPU,UC_MCONTEXT_OWNEDFP(%rdi)
+@@ -55,27 +55,32 @@ _Ux86_64_setcontext:
+ #endif
+ 
+ 	/* restore the rest of the state */
+-	mov    UC_MCONTEXT_GREGS_R8(%rdi),%r8
+-	mov    UC_MCONTEXT_GREGS_R9(%rdi),%r9
+-	mov    UC_MCONTEXT_GREGS_RBX(%rdi),%rbx
+-	mov    UC_MCONTEXT_GREGS_RBP(%rdi),%rbp
+-	mov    UC_MCONTEXT_GREGS_R12(%rdi),%r12
+-	mov    UC_MCONTEXT_GREGS_R13(%rdi),%r13
+-	mov    UC_MCONTEXT_GREGS_R14(%rdi),%r14
+-	mov    UC_MCONTEXT_GREGS_R15(%rdi),%r15
+-	mov    UC_MCONTEXT_GREGS_RSI(%rdi),%rsi
+-	mov    UC_MCONTEXT_GREGS_RDX(%rdi),%rdx
+-	mov    UC_MCONTEXT_GREGS_RAX(%rdi),%rax
+-	mov    UC_MCONTEXT_GREGS_RCX(%rdi),%rcx
+-	mov    UC_MCONTEXT_GREGS_RSP(%rdi),%rsp
++	mov    %gs:UC_MCONTEXT_GREGS_R8(%rdi),%r8
++	mov    %gs:UC_MCONTEXT_GREGS_R9(%rdi),%r9
++	mov    %gs:UC_MCONTEXT_GREGS_RBX(%rdi),%rbx
++	mov    %gs:UC_MCONTEXT_GREGS_RBP(%rdi),%rbp
++	mov    %gs:UC_MCONTEXT_GREGS_R12(%rdi),%r12
++	mov    %gs:UC_MCONTEXT_GREGS_R13(%rdi),%r13
++	mov    %gs:UC_MCONTEXT_GREGS_R14(%rdi),%r14
++	mov    %gs:UC_MCONTEXT_GREGS_R15(%rdi),%r15
++	mov    %gs:UC_MCONTEXT_GREGS_RSI(%rdi),%rsi
++	mov    %gs:UC_MCONTEXT_GREGS_RDX(%rdi),%rdx
++	mov    %gs:UC_MCONTEXT_GREGS_RAX(%rdi),%rax
++	mov    %gs:UC_MCONTEXT_GREGS_RCX(%rdi),%rcx
++	mov    %gs:UC_MCONTEXT_GREGS_RSP(%rdi),%rsp
+ 
+         /* push the return address on the stack */
+-	mov    UC_MCONTEXT_GREGS_RIP(%rdi),%rcx
+-	push   %rcx
++	lea    __ImageBase(%rip), %rcx
++	add    %gs:UC_MCONTEXT_GREGS_RIP(%rdi),%rcx
++	sub    $8, %rsp
++	mov    %rcx, %gs:(%rsp)
+ 
+-	mov    UC_MCONTEXT_GREGS_RCX(%rdi),%rcx
+-	mov    UC_MCONTEXT_GREGS_RDI(%rdi),%rdi
+-	retq
++	mov    %gs:UC_MCONTEXT_GREGS_RCX(%rdi),%rcx
++	mov    %gs:UC_MCONTEXT_GREGS_RDI(%rdi),%rdi
++
++	mov    %gs:(%rsp), %rcx
++	add    $8, %rsp
++	jmp    *%rcx
+ 
+ 	.size _Ux86_64_setcontext, . - _Ux86_64_setcontext
+ 
+diff --git a/sdk/debugger_interface/linux/se_ptrace.c b/sdk/debugger_interface/linux/se_ptrace.c
+index 9efe20f9..aa7ff493 100644
+--- a/sdk/debugger_interface/linux/se_ptrace.c
++++ b/sdk/debugger_interface/linux/se_ptrace.c
+@@ -324,6 +324,25 @@ static int get_enclave_gregs(pid_t pid, struct user_regs_struct *regs, long tcs_
+     SSA2USER_REG(regs, gpr, 13);
+     SSA2USER_REG(regs, gpr, 14);
+     SSA2USER_REG(regs, gpr, 15);
++    
++    uint64_t user_space_mask = 0x7fffffffffff;
++    uint64_t gs = gpr.gs & user_space_mask;
++
++    //uint64_t tmp_rbp = regs->rbp + gs;
++    //uint64_t tmp_rsp = regs->rsp + gs;
++
++    regs->gs = gs;
++    regs->fs = gpr.fs;
++
++    regs->rbp += gs;
++    regs->rsp += gs;
++
++    /*if (tmp_rbp < user_space_mask && tmp_rsp < user_space_mask) {
++        regs->rbp += tmp_rbp;
++        regs->rsp += tmp_rsp;
++    }*/
++
++    //SSA2USER_REG(regs, gpr, 15);
+ #endif
+     return 0;
+ }
+diff --git a/sdk/ec_dh_lib/Makefile b/sdk/ec_dh_lib/Makefile
+index ad0841e9..c4d79ba1 100644
+--- a/sdk/ec_dh_lib/Makefile
++++ b/sdk/ec_dh_lib/Makefile
+@@ -32,8 +32,6 @@
+ TOP_DIR  := ../..
+ include $(TOP_DIR)/buildenv.mk
+ 
+-CXXFLAGS += -Werror
+-
+ INCLUDE += -I$(COMMON_DIR)/inc/tlibc                          \
+            -I$(COMMON_DIR)/inc/internal                       \
+            -I$(COMMON_DIR)/inc                                \
+diff --git a/sdk/edger8r/linux/CodeGen.ml b/sdk/edger8r/linux/CodeGen.ml
+index 11137c72..9cb645f3 100644
+--- a/sdk/edger8r/linux/CodeGen.ml
++++ b/sdk/edger8r/linux/CodeGen.ml
+@@ -1604,7 +1604,7 @@ let gen_tbridge_local_vars (plist: Ast.pdecl list) =
+     let ty = Ast.get_param_atype pt in
+     let tmp_var =
+       (* Save a copy of pointer in case it might be modified in the marshaling structure. *)
+-      sprintf "\t%s%s %s = %s;\n" qual (Ast.get_tystr ty) (mk_tmp_var name) (mk_parm_accessor name)
++      sprintf "\t%s%s %s = (%s%s)sgx_make_pointer_gs_relative(%s);\n" qual (Ast.get_tystr ty) (mk_tmp_var name) qual (Ast.get_tystr ty) (mk_parm_accessor name)
+     in
+     let len_var =
+       if not attr.Ast.pa_chkptr then ""
+@@ -1678,7 +1678,7 @@ let gen_func_tbridge (fd: Ast.func_decl) (dummy_var: string) =
+ 
+     if is_naked_func fd then
+       let check_pms =
+-        sprintf "if (%s != NULL) return SGX_ERROR_INVALID_PARAMETER;" ms_ptr_name
++        sprintf "if ( sgx_make_pointer_absolute(%s) != NULL ) return SGX_ERROR_INVALID_PARAMETER;" ms_ptr_name
+       in
+         sprintf "%s%s%s\t%s\n\t%s\n%s" func_open local_vars dummy_var check_pms invoke_func func_close
+     else
+@@ -1708,8 +1708,8 @@ let tproxy_fill_ms_field (pd: Ast.pdecl) (is_ocall_switchless: bool) =
+               let is_ary = (Ast.is_array declr || attr.Ast.pa_isary) in
+               let tystr = sprintf "%s%s%s" (if is_const_ptr pt then "const " else"")(get_param_tystr pt) (if is_ary then "*" else "") in
+               if not attr.Ast.pa_chkptr then (* [user_check] specified *) 
+-                if is_ary then sprintf "%s = SGX_CAST(%s, %s);" parm_accessor tystr name
+-                else sprintf "%s = %s;" parm_accessor name
++                if is_ary then sprintf "%s = (%s)sgx_make_pointer_absolute(%s);" parm_accessor tystr name
++                else sprintf "%s = (%s)sgx_make_pointer_absolute(%s);" parm_accessor tystr name
+               else
+                 let check_size =
+                     match ty with
+@@ -1782,7 +1782,7 @@ let tproxy_fill_ms_field (pd: Ast.pdecl) (is_ocall_switchless: bool) =
+                   Ast.PtrOut ->
+                     let code_template =
+                       [sprintf "if (%s != NULL) {" name;
+-                       sprintf "\t%s = (%s)__tmp;" parm_accessor tystr;
++                       sprintf "\t%s = (%s)sgx_make_pointer_absolute(__tmp);" parm_accessor tystr;
+                        sprintf "\t__tmp_%s = __tmp;" name;
+                       ]
+                       @ check_size @
+@@ -1798,7 +1798,7 @@ let tproxy_fill_ms_field (pd: Ast.pdecl) (is_ocall_switchless: bool) =
+                 | Ast.PtrInOut ->
+                     let code_template =
+                       [sprintf "if (%s != NULL) {" name;
+-                       sprintf "\t%s = (%s)__tmp;" parm_accessor tystr;
++                       sprintf "\t%s = (%s)sgx_make_pointer_absolute(__tmp);" parm_accessor tystr;
+                        sprintf "\t__tmp_%s = __tmp;" name;
+                       ]
+                       @ check_size @
+@@ -1813,7 +1813,7 @@ let tproxy_fill_ms_field (pd: Ast.pdecl) (is_ocall_switchless: bool) =
+                 | _ ->
+                     let code_template =
+                       [sprintf "if (%s != NULL) {" name;
+-                       sprintf "\t%s = (%s)__tmp;" parm_accessor tystr;
++                       sprintf "\t%s = (%s)sgx_make_pointer_absolute(__tmp);" parm_accessor tystr;
+                       ]
+                       @ check_size @
+                       [
+diff --git a/sdk/encrypt_enclave/Makefile b/sdk/encrypt_enclave/Makefile
+index e47d9b32..9b322ba5 100644
+--- a/sdk/encrypt_enclave/Makefile
++++ b/sdk/encrypt_enclave/Makefile
+@@ -37,9 +37,9 @@ endif
+ 
+ INC_DIR	:= -I$(COMMON_DIR)/inc -I$(COMMON_DIR)/inc/internal -I.
+ CXXFLAGS += $(INC_DIR) -Wno-attributes -g -mrdrnd -fpie
+-LDFLAGS := -pie $(COMMON_LDFLAGS)
++LDFLAGS := -pie $(COMMON_LDFLAGS) -Wl,--defsym,__ImageBase=0
+ 
+-LINK_FLAGS := -lcrypto -L$(BUILD_DIR) -lsgx_tservice
++LINK_FLAGS := -lcrypto -L$(BUILD_DIR) -lsgx_tservice 
+ CPP_FILES := encryptip.cpp
+ OBJS := $(CPP_FILES:.cpp=.o)
+ TOOL_NAME := sgx_encrypt
+diff --git a/sdk/gperftools/Makefile b/sdk/gperftools/Makefile
+index 6d91aabc..edc0c27d 100644
+--- a/sdk/gperftools/Makefile
++++ b/sdk/gperftools/Makefile
+@@ -50,6 +50,8 @@ libtcmalloc:
+ 		( test -f Makefile || \
+ 			CFLAGS="$(CFLAGS)" \
+ 			CXXFLAGS="$(CXXFLAGS)" \
++			CC="$(CC)" \
++			CXX="$(CXX)" \
+ 			ENCLAVE_CFLAGS="$(ENCLAVE_CFLAGS)" \
+ 			ENCLAVE_CXXFLAGS="$(ENCLAVE_CXXFLAGS)" ./autogen.sh $(DEBUG_FLAG) ) \
+ 		&& $(MAKE)
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/Makefile b/sdk/protected_fs/sgx_tprotected_fs/Makefile
+index 528c415a..8e2c0376 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/Makefile
++++ b/sdk/protected_fs/sgx_tprotected_fs/Makefile
+@@ -39,7 +39,7 @@ INCLUDE += -I. \
+ 
+ INCLUDE += -I$(LINUX_SDK_DIR)/tlibcxx/include
+ 
+-CXXFLAGS += $(ENCLAVE_CXXFLAGS) -U__STRICT_ANSI__ -Werror
++CXXFLAGS += $(ENCLAVE_CXXFLAGS) -U__STRICT_ANSI__
+ #CXXFLAGS += -Wno-unused-local-typedefs -Wno-shadow -Wno-missing-field-initializers -Wno-unused-parameter
+ 
+ SRC := $(wildcard *.cpp)
+diff --git a/sdk/sample_libcrypto/Makefile b/sdk/sample_libcrypto/Makefile
+index 30260c6c..66259eda 100644
+--- a/sdk/sample_libcrypto/Makefile
++++ b/sdk/sample_libcrypto/Makefile
+@@ -33,12 +33,12 @@
+ include ../../buildenv.mk
+ 
+ 
+-CXXFLAGS += -Werror -fno-rtti -fno-exceptions -fPIC
++CXXFLAGS += -fno-rtti -fno-exceptions -fPIC
+ 
+ CPPFLAGS := -isystem $(SGX_IPP_INC) \
+             -I$(COMMON_DIR)/inc/internal/           
+ 
+-CFLAGS +=  -fPIC -Werror -fno-exceptions -I$(SGX_IPP_INC)
++CFLAGS +=  -fPIC -fno-exceptions -I$(SGX_IPP_INC)
+ 
+ IPPLIB_DIR = $(SGX_IPP_DIR)/lib/linux/intel64/no_mitigation
+ 
+diff --git a/sdk/selib/linux/Makefile b/sdk/selib/linux/Makefile
+index 9029d250..a9e12ee9 100644
+--- a/sdk/selib/linux/Makefile
++++ b/sdk/selib/linux/Makefile
+@@ -31,7 +31,7 @@
+ 
+ include ../../../buildenv.mk
+ 
+-CXXFLAGS += $(ENCLAVE_CXXFLAGS) -Werror -fno-rtti -fno-exceptions
++CXXFLAGS += $(ENCLAVE_CXXFLAGS) -fno-rtti -fno-exceptions
+ 
+ CPPLAGS += -I$(COMMON_DIR)/inc/              \
+            -I$(COMMON_DIR)/inc/internal/     \
+diff --git a/sdk/sign_tool/SignTool/manage_metadata.cpp b/sdk/sign_tool/SignTool/manage_metadata.cpp
+index 6956b748..fa390558 100644
+--- a/sdk/sign_tool/SignTool/manage_metadata.cpp
++++ b/sdk/sign_tool/SignTool/manage_metadata.cpp
+@@ -1087,7 +1087,16 @@ bool CMetadata::build_tcs_template(tcs_t *tcs)
+     tcs->cssa = 0;
+     tcs->ossa = get_entry_by_id(LAYOUT_ID_SSA)->rva - get_entry_by_id(LAYOUT_ID_TCS)->rva;
+     //fs/gs pointer at TLS/TD
+-    tcs->ofs_base = tcs->ogs_base = get_entry_by_id(LAYOUT_ID_TD)->rva - get_entry_by_id(LAYOUT_ID_TCS)->rva + (((uint64_t)get_entry_by_id(LAYOUT_ID_TD)->page_count - 1) << SE_PAGE_SHIFT);
++    
++    tcs->ofs_base = get_entry_by_id(LAYOUT_ID_TD)->rva - get_entry_by_id(LAYOUT_ID_TCS)->rva + (((uint64_t)get_entry_by_id(LAYOUT_ID_TD)->page_count - 1) << SE_PAGE_SHIFT);
++
++    // enable gs relative lvi-null mitigation if product id is set
++    if ( m_metadata && (m_metadata->enclave_css.body.isv_prod_id == 0xdead) ) {
++        tcs->ogs_base = 0;
++    } else {
++        tcs->ogs_base = tcs->ofs_base;
++    }
++
+     tcs->ofs_limit = tcs->ogs_limit = (uint32_t)-1;
+     return true;
+ }
+diff --git a/sdk/simulation/urtssim/linux/Makefile b/sdk/simulation/urtssim/linux/Makefile
+index e9df68da..4fa81d99 100644
+--- a/sdk/simulation/urtssim/linux/Makefile
++++ b/sdk/simulation/urtssim/linux/Makefile
+@@ -64,7 +64,7 @@ DIR6 := $(LINUX_PSW_DIR)/../common/src
+ 
+ 
+ LDFLAGS += -L$(COMMON_DIR)/se_wrapper \
+-           -L$(SIM_DIR)/uae_service_sim/linux
++           -L$(SIM_DIR)/uae_service_sim/linux -Wl,--defsym,__ImageBase=0
+ LDFLAGS += -L$(VTUNE_DIR)/sdk/src/ittnotify/ -littnotify -ldl -lpthread
+ 
+ OBJ1 := enclave.o         \
+diff --git a/sdk/tkey_exchange/Makefile b/sdk/tkey_exchange/Makefile
+index 4fbeedef..7be0f3cd 100644
+--- a/sdk/tkey_exchange/Makefile
++++ b/sdk/tkey_exchange/Makefile
+@@ -32,7 +32,6 @@
+ TOP_DIR  = ../..
+ include $(TOP_DIR)/buildenv.mk
+ 
+-CXXFLAGS += -Werror
+ 
+ INCLUDE += -I$(COMMON_DIR)/inc/tlibc    \
+            -I$(COMMON_DIR)/inc/internal \
+diff --git a/sdk/tlibc/Makefile b/sdk/tlibc/Makefile
+index 130f746f..879df798 100644
+--- a/sdk/tlibc/Makefile
++++ b/sdk/tlibc/Makefile
+@@ -33,8 +33,8 @@ include ../../buildenv.mk
+ 
+ CFLAGS   += $(ENCLAVE_CFLAGS) -D_TLIBC_GNU_
+ ASFLAGS  := $(CFLAGS)
+-CFLAGS   += -std=c99
+-CXXFLAGS += $(ENCLAVE_CXXFLAGS) -fno-exceptions -fno-rtti
++CFLAGS   += -std=c99 -fno-builtin
++CXXFLAGS += $(ENCLAVE_CXXFLAGS) -fno-exceptions -fno-rtti -fno-builtin
+ 
+ CPPFLAGS += -I.                          \
+             -I$(COMMON_DIR)/inc          \
+diff --git a/sdk/tlibc/gen/spinlock.c b/sdk/tlibc/gen/spinlock.c
+index ab06f735..81b6924f 100644
+--- a/sdk/tlibc/gen/spinlock.c
++++ b/sdk/tlibc/gen/spinlock.c
+@@ -30,24 +30,27 @@
+  */
+ 
+ #include <sgx_spinlock.h>
+-
++#ifndef __clang__
+ static inline void _mm_pause(void) __attribute__((always_inline));
++#endif
+ static inline int _InterlockedExchange(int volatile * dst, int val) __attribute__((always_inline));
+ 
++#ifndef __clang__
+ static inline void _mm_pause(void)  /* definition requires -ffreestanding */
+ {
+     __asm __volatile(
+         "pause"
+     );
+ }
++#endif
+ 
+-static inline int _InterlockedExchange(int volatile * dst, int val)
++int _InterlockedExchange(int volatile * dst, int val)
+ {
+     int res;
+ 
+     __asm __volatile(
+-        "lock xchg %2, %1;"
+-        "mov %2, %0"
++        "lock xchg %2, %%gs:%1;"
++        "mov %2, %%gs:%0"
+         : "=m" (res)
+         : "m" (*dst),
+         "r" (val) 
+diff --git a/sdk/tlibc/math/e_powl.c b/sdk/tlibc/math/e_powl.c
+index 6e956811..7f5cd485 100644
+--- a/sdk/tlibc/math/e_powl.c
++++ b/sdk/tlibc/math/e_powl.c
+@@ -464,7 +464,7 @@ if( nflg )
+ 
+ return( z );
+ }
+-DEF_STD(powl);
++//DEF_STD(powl);
+ 
+ 
+ /* Find a multiple of 1/NXT that is within 1/NXT of x. */
+diff --git a/sdk/tlibc/string/strchr.c b/sdk/tlibc/string/strchr.c
+index 8fea709a..59a77a14 100644
+--- a/sdk/tlibc/string/strchr.c
++++ b/sdk/tlibc/string/strchr.c
+@@ -30,6 +30,11 @@
+ 
+ #include <string.h>
+ 
++
++#define __weak_alias(alias,sym)				\
++	__asm__(".weak " __STRING(alias) " ; "		\
++	    __STRING(alias) " = " __STRING(sym))
++
+ __weak_alias(index, strchr);
+ 
+ #ifdef _TLIBC_USE_INTEL_FAST_STRING_
+diff --git a/sdk/tlibc/string/strrchr.c b/sdk/tlibc/string/strrchr.c
+index 74767eb8..b7aead28 100644
+--- a/sdk/tlibc/string/strrchr.c
++++ b/sdk/tlibc/string/strrchr.c
+@@ -36,6 +36,10 @@
+ extern char *_intel_fast_strrchr(const char *, int);
+ #endif
+ 
++#define __weak_alias(alias,sym)				\
++	__asm__(".weak " __STRING(alias) " ; "		\
++	    __STRING(alias) " = " __STRING(sym))
++
+ __weak_alias(rindex, strrchr);
+ 
+ char *
+diff --git a/sdk/tlibcrypto/Makefile b/sdk/tlibcrypto/Makefile
+index 08c72fc9..26c6c823 100644
+--- a/sdk/tlibcrypto/Makefile
++++ b/sdk/tlibcrypto/Makefile
+@@ -36,7 +36,7 @@ CPPFLAGS := -I$(COMMON_DIR)/inc/internal \
+             -I$(COMMON_DIR)/inc/tlibc    \
+ 	    -I$(SGX_IPP_INC)
+ 
+-CXXFLAGS += $(ENCLAVE_CXXFLAGS) -Werror -fno-exceptions -fno-rtti
++CXXFLAGS += $(ENCLAVE_CXXFLAGS) -fno-exceptions -fno-rtti
+ 
+ OBJ = init_tcrypto_lib.o sgx_aes_ctr.o sgx_rsa_encryption.o sgx_aes_gcm.o sgx_cmac128.o sgx_hmac.o sgx_ecc256.o sgx_ecc256_ecdsa.o sgx_sha256.o sgx_sha1.o sgx_sha256_msg.o sgx_ecc256_internal.o sgx_rsa3072.o sgx_internal.o
+ SHARED_OBJ = tcrypto_version.o sgx_common_init_ipp.o
+@@ -71,7 +71,7 @@ PREPRARE_SGX_SSL:
+ 	chmod 755 $(PREPARE_SGXSSL)
+ 	test -f $(OPENSSL_LIBRARY_PATH)/lib$(SGXSSL_Library_Name).a || $(PREPARE_SGXSSL)
+ 
+-CPPFLAGS += -I$(OPENSSL_PACKAGE)/include -fPIC
++CPPFLAGS += -I$(OPENSSL_PACKAGE)/include
+ CXXFLAGS += -DUSE_SGXSSL
+ SRCDIR := sgxssl
+ 
+@@ -79,7 +79,7 @@ LIB_NAME := libsgx_tcrypto_sgxssl.a
+ 
+ else
+ # Build IPP crypto based sgx_tcrypto library
+-CFLAGS += $(CPPFLAGS) $(ENCLAVE_CFLAGS) $(SGX_COMMON_CFLAGS) -Werror -fno-exceptions -fPIC
++CFLAGS += $(CPPFLAGS) $(ENCLAVE_CFLAGS) $(SGX_COMMON_CFLAGS) -Werror -fno-exceptions
+ 
+ OBJ += sgx_tcrypto_common.o sgx_rsa_internal.o
+ SRCDIR := ipp
+diff --git a/sdk/tlibthread/Makefile b/sdk/tlibthread/Makefile
+index 8fbc206d..8464cbbb 100755
+--- a/sdk/tlibthread/Makefile
++++ b/sdk/tlibthread/Makefile
+@@ -30,8 +30,11 @@
+ #
+ 
+ include ../../buildenv.mk
+-
++ifeq ($(CXX), clang++)
++CXXFLAGS += -Qunused-arguments $(ENCLAVE_CXXFLAGS) -Werror -fno-exceptions -fno-rtti
++else	
+ CXXFLAGS += $(ENCLAVE_CXXFLAGS) -Werror -fno-exceptions -fno-rtti
++endif
+ 
+ CPPFLAGS := -I$(COMMON_DIR)/inc/internal \
+             -I$(COMMON_DIR)/inc          \
+diff --git a/sdk/trts/Makefile b/sdk/trts/Makefile
+index e56b1277..acdefcbe 100644
+--- a/sdk/trts/Makefile
++++ b/sdk/trts/Makefile
+@@ -38,9 +38,9 @@ CPPFLAGS += -I$(COMMON_DIR)/inc          \
+             -I$(LINUX_SDK_DIR)/pthread
+ 
+ CXXFLAGS += $(ENCLAVE_CXXFLAGS) \
+-            -Werror         \
+             -fno-exceptions \
+-            -fno-rtti
++            -fno-rtti \
++            -fno-jump-tables
+ 
+ TCXXFLAGS := $(patsubst -fstack-protector%,-fno-stack-protector,$(CXXFLAGS))
+ 
+@@ -64,11 +64,11 @@ OBJS := $(OBJS1) $(OBJS2)
+ all: $(OBJS) elf_parser
+ 
+ $(OBJS1): %.o: %.cpp
+-	$(CXX) -c $(CXXFLAGS) $(CPPFLAGS) -fPIC $< -o $@
++	$(CXX) -c $(CXXFLAGS) $(CPPFLAGS) $< -o $@
+ 	objcopy $@ --set-section-flags .niprod='alloc','readonly'
+ 
+ $(OBJS2): %.o: %.cpp
+-	$(CXX) -c $(TCXXFLAGS) $(CPPFLAGS) -fPIC $< -o $@
++	$(CXX) -c $(TCXXFLAGS) $(CPPFLAGS) $< -o $@
+ 
+ .PHONY: elf_parser
+ elf_parser: $(OBJS)
+diff --git a/sdk/trts/init_enclave.cpp b/sdk/trts/init_enclave.cpp
+index 0832ab1c..ad6159b2 100644
+--- a/sdk/trts/init_enclave.cpp
++++ b/sdk/trts/init_enclave.cpp
+@@ -86,12 +86,13 @@ extern "C" int rsrv_mem_init(void *_rsrv_mem_base, size_t _rsrv_mem_size, size_t
+ //
+ extern "C" int init_enclave(void *enclave_base, void *ms)
+ {
+-    if(enclave_base == NULL || ms == NULL)
++    asm volatile(""::"r"(&relocate_enclave):"memory");
++    if(ms == NULL)
+     {
+         return -1;
+     }
+ 
+-    if(NULL != pcl_entry)
++    if(0 && NULL != pcl_entry)
+     {
+         // LFENCE before pcl_entry
+         sgx_lfence();
+@@ -106,9 +107,11 @@ extern "C" int init_enclave(void *enclave_base, void *ms)
+             return -1;
+         }
+     }
+-
++    int reloc_ret;
++    reloc_ret = relocate_enclave(enclave_base);
++    //REL_PC_CALL_R_1(reloc_ret, relocate_enclave, enclave_base);
+     // relocation
+-    if(0 != relocate_enclave(enclave_base))
++    if(0 != reloc_ret)
+     {
+         return -1;
+     }
+@@ -216,21 +219,37 @@ extern size_t rsrv_mem_min_size;
+ 
+ sgx_status_t do_init_enclave(void *ms, void *tcs)
+ {
++    asm volatile(""::"r"(&get_enclave_base):"memory");
++    asm volatile(""::"r"(&lock_enclave):"memory");
++    asm volatile(""::"r"(&init_enclave):"memory");
++
+ #ifdef SE_SIM
+     UNUSED(tcs);
+ #endif
+-    void *enclave_base = get_enclave_base();
+-    if(ENCLAVE_INIT_NOT_STARTED != lock_enclave())
++    void *enclave_base;
++    enclave_base = get_enclave_base();
++    //REL_PC_CALL_R_0(enclave_base, get_enclave_base);
++    
++    int lock_status;
++    lock_status = lock_enclave();
++    //REL_PC_CALL_R_0(lock_status, lock_enclave);
++
++    if(ENCLAVE_INIT_NOT_STARTED != lock_status)
+     {
+         return SGX_ERROR_UNEXPECTED;
+     }
+-    if(0 != init_enclave(enclave_base, ms))
++
++    int enclave_init_status;
++    enclave_init_status = init_enclave(enclave_base, ms);
++    //REL_PC_CALL_R_2(enclave_init_status, init_enclave, enclave_base, ms);
++    if(0 != enclave_init_status)
+     {
+         return SGX_ERROR_UNEXPECTED;
+     }
+ 
+ #ifndef SE_SIM
+-    if (SGX_SUCCESS != do_init_thread(tcs, true))
++
++    if (SGX_SUCCESS != do_init_thread((void*)tcs, true))
+     {
+         return SGX_ERROR_UNEXPECTED;
+     }
+diff --git a/sdk/trts/init_optimized_lib.cpp b/sdk/trts/init_optimized_lib.cpp
+index d52b6b83..68bfc712 100644
+--- a/sdk/trts/init_optimized_lib.cpp
++++ b/sdk/trts/init_optimized_lib.cpp
+@@ -109,12 +109,12 @@ extern "C" int init_optimized_libs(const uint64_t feature_bit_array, uint32_t *c
+     {
+         return -1;
+     }
+-
++    (void)cpuinfo_table;
+     // Init IPP crypto library with the global feature indicator	
+-    if(sgx_init_crypto_lib(g_cpu_feature_indicator, cpuinfo_table) != 0)
++    /*if(sgx_init_crypto_lib(g_cpu_feature_indicator, cpuinfo_table) != 0)
+     {
+         return -1;
+-    }
++    }*/
+ 
+     return 0;
+ }
+diff --git a/sdk/trts/linux/Makefile b/sdk/trts/linux/Makefile
+index 42a03c93..e6a83c9f 100644
+--- a/sdk/trts/linux/Makefile
++++ b/sdk/trts/linux/Makefile
+@@ -31,12 +31,13 @@
+ 
+ include ../../../buildenv.mk
+ 
+-CFLAGS += -Werror $(ENCLAVE_CFLAGS)          \
+-          -I$(LINUX_SDK_DIR)/trts            \
+-          -I$(COMMON_DIR)/inc                \
+-          -I$(COMMON_DIR)/inc/internal       \
+-          -I$(COMMON_DIR)/inc/internal/linux \
+-          -I$(LINUX_SDK_DIR)/simulation/assembly/
++CFLAGS += -Werror $(ENCLAVE_CFLAGS)               \
++          -I$(LINUX_SDK_DIR)/trts                 \
++          -I$(COMMON_DIR)/inc                     \
++          -I$(COMMON_DIR)/inc/internal            \
++          -I$(COMMON_DIR)/inc/internal/linux      \
++          -I$(LINUX_SDK_DIR)/simulation/assembly/ \
++          -fno-jump-tables
+ 
+ CXXFLAGS += -Werror $(ENCLAVE_CXXFLAGS)      \
+           -I$(LINUX_SDK_DIR)/trts            \
+diff --git a/sdk/trts/linux/elf_parser.c b/sdk/trts/linux/elf_parser.c
+index 1d5c233b..75c6c267 100644
+--- a/sdk/trts/linux/elf_parser.c
++++ b/sdk/trts/linux/elf_parser.c
+@@ -42,13 +42,79 @@
+ #include "../trts_emodpr.h"
+ #include "trts_inst.h"
+ 
++
++#define REL_PC_CALL_CORE(_symbol)                \
++    "lea 1f(%%rip), %%rax \n"                    \
++    "sub $136, %%rsp \n"                         \
++    "mov %%rax, %%gs:(%%rsp) \n"                 \
++    "mov " #_symbol "@GOTPCREL(%%rip), %%rax \n" \
++    "jmp *%%rax \n"                              \
++    "1: \n"                                      \
++    "add $128, %%rsp \n"                         
++
++
++#define REL_PC_CALL_R_0(_ret,_symbol)                \
++asm volatile(                                        \
++    REL_PC_CALL_CORE(_symbol)                        \
++    : "=a"(_ret)                                     \
++    :: "rcx","rdx","rsi","rdi","r8","r9","r10","r11" \
++)
++
++#define REL_PC_CALL_R_1(_ret,_symbol,_a0)     \
++asm volatile(                                 \
++    REL_PC_CALL_CORE(_symbol)                 \
++    : "=a"(_ret)                              \
++    : "D"(_a0)                                \
++    : "rcx","rdx","rsi","r8","r9","r10","r11" \
++)
++
++#define REL_PC_CALL_R_2(_ret,_symbol,_a0,_a1) \
++asm volatile(                                 \
++    REL_PC_CALL_CORE(_symbol)                 \
++    : "=a"(_ret)                              \
++    : "D"(_a0), "S"(_a1)                      \
++    : "rcx","rdx","r8","r9","r10","r11"       \
++)
++
++#define REL_PC_CALL_R_4(_ret,_symbol,_a0,_a1,_a2,_a3) \
++asm volatile(                                 \
++    REL_PC_CALL_CORE(_symbol)                 \
++    : "=a"(_ret)                              \
++    : "D"(_a0), "S"(_a1), "d"(_a2), "c"(_a3)  \
++    : "r8","r9","r10","r11"                   \
++)
++
++
++#define REL_PC_CALL_1(_symbol,_a0)            \
++asm volatile(                                 \
++    REL_PC_CALL_CORE(_symbol)                 \
++    :: "D"(_a0)                               \
++    : "rcx","rdx","rsi","r8","r9","r10","r11" \
++)
++
++#define GET_ENCLAVE_STATE(_state)            \
++asm volatile(                                \
++    "lea g_enclave_state(%%rip), %%rax \n"   \
++    "movl (%%rax), %0 \n"                    \
++    : "=r"(_state)                           \
++    :: "rax"                                 \
++)
++
++#define SET_ENCLAVE_STATE(_state)            \
++asm volatile(                                \
++    "lea g_enclave_state(%%rip), %%rax \n"   \
++    "movl %0, (%%rax) \n"                    \
++    :: "r"(_state)                           \
++    : "rax"                                  \
++)
++
+ static int elf_tls_aligned_virtual_size(const void *enclave_base,
+                             size_t *aligned_virtual_size);
+ 
+-static ElfW(Phdr)* get_phdr(const ElfW(Ehdr)* ehdr)
++ElfW(Phdr)* get_phdr(const ElfW(Ehdr)* ehdr)
+ {
+-    if (ehdr == NULL)
+-        return NULL;  /* Invalid image. */
++    //if (ehdr == NULL)
++    //    return NULL;  /* Invalid image. */
+ 
+     /* Check the ElfW Magic number. */
+     if ((ehdr->e_ident[EI_MAG0] != ELFMAG0) ||
+@@ -75,6 +141,9 @@ static ElfW(Sym)* get_sym(ElfW(Sym)* symtab, size_t idx)
+     return &symtab[idx];
+ }
+ 
++
++uint64_t get_real_enclave_base(void);
++
+ #ifdef __x86_64__
+ /* Relocation for x64 (with addend) */
+ static int do_relocs(const ElfW(Addr) enclave_base,
+@@ -82,12 +151,20 @@ static int do_relocs(const ElfW(Addr) enclave_base,
+         ElfW(Addr) sym_offset,
+         size_t nr_relocs)
+ {
++    asm volatile(""::"r"(&get_sym):"memory");
++    asm volatile(""::"r"(&elf_tls_aligned_virtual_size):"memory");
++    asm volatile(""::"r"(&get_real_enclave_base):"memory");
++
+     ElfW(Rela)* rela = GET_PTR(ElfW(Rela), enclave_base, rela_offset);
+     ElfW(Sym)*  symtab = GET_PTR(ElfW(Sym), enclave_base, sym_offset);
+     ElfW(Sym)*  sym;
+     size_t      i;
+     size_t aligned_virtual_size = 0;
+ 
++    uint64_t enclave_real_base;
++    enclave_real_base = get_real_enclave_base();
++    //REL_PC_CALL_R_0(enclave_real_base, get_real_enclave_base);
++
+     for (i = 0; i < nr_relocs; ++i, ++rela)
+     {
+         ElfW(Addr)* reloc_addr = GET_PTR(ElfW(Addr), enclave_base, rela->r_offset);
+@@ -95,41 +172,56 @@ static int do_relocs(const ElfW(Addr) enclave_base,
+         switch (ELF64_R_TYPE(rela->r_info))
+         {
+             case R_X86_64_RELATIVE:
+-                *reloc_addr = enclave_base + (uintptr_t)rela->r_addend;
++                *reloc_addr = ((ElfW(Addr)) enclave_real_base) + (uintptr_t)rela->r_addend;
+                 break;
+ 
+             case R_X86_64_GLOB_DAT:
+             case R_X86_64_JUMP_SLOT:
+-            case R_X86_64_64:
+-                sym = get_sym(symtab, ELF64_R_SYM(rela->r_info));
++            case R_X86_64_64: {
++                size_t sym_index = ELF64_R_SYM(rela->r_info);
++                sym = get_sym(symtab, sym_index);
++                //REL_PC_CALL_R_2(sym, get_sym, symtab, sym_index);
+                 if(!sym)
+                     break;
+                 *reloc_addr = enclave_base + sym->st_value + (uintptr_t)rela->r_addend;
+                 break;
++            }
+ 
+             case R_X86_64_DTPMOD64:
+                 *reloc_addr = 1;
+                 break;
+  
+-            case R_X86_64_DTPOFF64:
+-                sym = get_sym(symtab, ELF64_R_SYM(rela->r_info));
++            case R_X86_64_DTPOFF64: {
++                size_t sym_index = ELF64_R_SYM(rela->r_info);
++                sym = get_sym(symtab, sym_index);
++                //REL_PC_CALL_R_2(sym, get_sym, symtab, sym_index);
+                 if(!sym)
+                     break;
+                 *reloc_addr = sym->st_value + (uintptr_t)rela->r_addend;
+                 break;
++            }
+ 
+-            case R_X86_64_TPOFF64:
+-                sym = get_sym(symtab, ELF64_R_SYM(rela->r_info));
++            case R_X86_64_TPOFF64: {
++                size_t sym_index = ELF64_R_SYM(rela->r_info);
++                sym = get_sym(symtab, sym_index);
++                //REL_PC_CALL_R_2(sym, get_sym, symtab, sym_index);
+                 if(!sym)
+                     break;
+ 
+-                if ((0 == elf_tls_aligned_virtual_size((void *)enclave_base, &aligned_virtual_size)) && (aligned_virtual_size))
++                int ret;
++                void* base = (void *)enclave_base;
++                size_t *ptr = &aligned_virtual_size;
++                ret = elf_tls_aligned_virtual_size(base, ptr);
++                //REL_PC_CALL_R_2(ret, elf_tls_aligned_virtual_size, base, ptr);
++
++                if ((0 == ret) && (aligned_virtual_size))
+                 {
+                     *reloc_addr = sym->st_value + (uintptr_t)rela->r_addend - aligned_virtual_size;
+                     break;
+                 }
+                 else
+                     return -1;
++            }
+ 
+             case R_X86_64_NONE:
+                 break;
+@@ -228,7 +320,11 @@ do {                                                        \
+         if (rel_entry_sz == 0)                              \
+             return -1;                                      \
+         n = total_sz/rel_entry_sz;                          \
+-        if (do_relocs((ElfW(Addr))base_addr, rel_offset, sym_offset, n)) \
++        int ret;                                            \
++        ElfW(Addr) base = (ElfW(Addr))base_addr;            \
++        ret = do_relocs(base, rel_offset, sym_offset, n);   \
++        /*REL_PC_CALL_R_4(ret, do_relocs, base, rel_offset, sym_offset, n);*/ \
++        if (ret)                                            \
+             return -1;                                      \
+     }                                                       \
+ } while (0)
+@@ -244,9 +340,14 @@ do {                                                        \
+ __attribute__ ((visibility ("hidden")))
+ int relocate_enclave(void* enclave_base)
+ {
++    asm volatile(""::"r"(&get_phdr):"memory");
++    asm volatile(""::"r"(&do_relocs): "memory");
++
+     ElfW(Half) phnum = 0;
+     ElfW(Ehdr) *ehdr = (ElfW(Ehdr)*)enclave_base;
+-    ElfW(Phdr) *phdr = get_phdr(ehdr);
++    ElfW(Phdr) *phdr;
++    phdr = get_phdr(ehdr);
++    //REL_PC_CALL_R_1(phdr, get_phdr, ehdr);
+ 
+     if (phdr == NULL)
+         return -1;  /* Invalid image. */
+@@ -344,6 +445,9 @@ int elf_tls_info(const void* enclave_base,
+ static int elf_tls_aligned_virtual_size(const void *enclave_base,
+                                         size_t *aligned_virtual_size)
+ {
++    asm volatile(""::"r"(&get_phdr):"memory");
++    asm volatile("ud2"); // TODO
++
+     ElfW(Half) phnum = 0;
+     const ElfW(Ehdr) *ehdr = (const ElfW(Ehdr)*)enclave_base;
+     ElfW(Phdr) *phdr = get_phdr(ehdr);
+diff --git a/sdk/trts/linux/trts_pic.S b/sdk/trts/linux/trts_pic.S
+index 366db08a..1895ea30 100644
+--- a/sdk/trts/linux/trts_pic.S
++++ b/sdk/trts/linux/trts_pic.S
+@@ -44,21 +44,39 @@
+     .section .nipx,"ax",@progbits
+ 
+ DECLARE_LOCAL_FUNC get_enclave_base
++    /* lea_pic __ImageBase, %xax */
++    xor %rax, %rax
++    GS_REL_RET
++
++DECLARE_LOCAL_FUNC get_real_enclave_base
+     lea_pic __ImageBase, %xax
+-    ret
++    GS_REL_RET
++
++DECLARE_GLOBAL_FUNC sgx_make_pointer_gs_relative
++    lea __ImageBase(%rip), %rax
++    sub %rax, %rdi
++    mov %rdi, %rax
++    GS_REL_RET
++
++DECLARE_GLOBAL_FUNC sgx_make_pointer_absolute
++    lea __ImageBase(%rip), %rax
++    add %rdi, %rax
++    GS_REL_RET
++
+ DECLARE_LOCAL_FUNC get_enclave_state
+     lea_pic g_enclave_state, %xcx
+     xor     %xax, %xax
+     movl    (%xcx), %eax
+-    ret
++    GS_REL_RET
++
+ DECLARE_LOCAL_FUNC set_enclave_state
+     lea_pic g_enclave_state, %xax
+ #ifdef LINUX32
+     mov     SE_WORDSIZE(%esp), %edi
+ #endif
+     movl    %edi, (%xax)
+-    ret
+-
++    GS_REL_RET
++    
+ DECLARE_LOCAL_FUNC lock_enclave
+     lea_pic g_enclave_state, %xdx
+     xor     %xax, %xax
+@@ -66,7 +84,7 @@ DECLARE_LOCAL_FUNC lock_enclave
+     xor     %xcx, %xcx
+     mov     $ENCLAVE_INIT_IN_PROGRESS, %ecx     /* if (g_global_data.enclave_state == ENCLAVE_INIT_NOT_STARTED) */
+     lock cmpxchgl %ecx, (%xdx)                  /*   g_global_data.enclave_state == ENCLAVE_INIT_IN_PROGRESS */
+-    ret                                         /* xax: the initial value of enclave state */
++    GS_REL_RET                                  /* xax: the initial value of enclave state */
+ 
+ /* 
+  * ---------------------------------------------------------------------
+@@ -77,7 +95,7 @@ DECLARE_LOCAL_FUNC lock_enclave
+  */
+ DECLARE_LOCAL_FUNC get_thread_data
+     READ_TD_DATA self_addr 
+-    ret
++    GS_REL_RET
+ 
+ /* 
+  * ---------------------------------------------------------------------
+@@ -88,7 +106,7 @@ DECLARE_LOCAL_FUNC get_thread_data
+  */
+ DECLARE_LOCAL_FUNC get_stack_guard 
+     READ_TD_DATA stack_guard 
+-    ret
++    GS_REL_RET
+     
+ /* 
+  * ---------------------------------------------------------------------
+@@ -136,11 +154,14 @@ DECLARE_GLOBAL_FUNC enclave_entry
+     jne     .Ldo_handler                /* handle exception state */
+     /* xor     %xdx, %xdx                  xdx is cssa, make sure it is 0 */
+     READ_TD_DATA last_sp
+-    cmp     $0, %xax
++    lea_pic __ImageBase, %xdx
++    add     %xdx, %xax
++    cmp     %xdx, %xax
+     jne .Lswitch_stack
+     GET_STACK_BASE  %xbx                /* if last_sp == 0, set sp to stack base */
+     sub     $STATIC_STACK_SIZE, %xax    /* give space for static stack */
+ .Lswitch_stack:
++    xor     %xdx, %xdx
+     xchg    %xsp, %xax
+     push    %xcx
+     push    %xbp
+@@ -153,33 +174,41 @@ DECLARE_GLOBAL_FUNC enclave_entry
+     CLEAN_XFLAGS
+ 
+ 
++    lea_pic __ImageBase, %rcx
++    sub %rcx, %rsp
++    sub %rcx, %rbp
++    sub %rcx, %rbx /* TCS */
++    sub %rcx, %rsi /* ms */
++
+     /* Save the registers */
+     sub     $(6*SE_WORDSIZE), %xsp
+-    mov     %xax, -1*SE_WORDSIZE(%xbp)  /* xsp_u */
+-    mov     %xdx, -3*SE_WORDSIZE(%xbp)  /* cssa */
+-    mov     %xbx, -4*SE_WORDSIZE(%xbp)  /* TCS */
+-    mov     %xsi, -5*SE_WORDSIZE(%xbp)  /* XSI */
+-    mov     %xdi, -6*SE_WORDSIZE(%xbp)  /* XDI */
++    mov     %xax, %gs:-1*SE_WORDSIZE(%xbp)  /* xsp_u */
++    mov     %xdx, %gs:-3*SE_WORDSIZE(%xbp)  /* cssa */
++    mov     %xbx, %gs:-4*SE_WORDSIZE(%xbp)  /* TCS */
++    mov     %xsi, %gs:-5*SE_WORDSIZE(%xbp)  /* XSI */
++    mov     %xdi, %gs:-6*SE_WORDSIZE(%xbp)  /* XDI */
+ 
+     /* clean extended feature registers */
+     sub     $(4*SE_WORDSIZE), %xsp
+ 
+     lea_pic SYNTHETIC_STATE, %xdi
+ #ifdef LINUX32
+-    mov     %xdi, (%xsp)
++    mov     %xdi, %gs:(%xsp)
+ #endif
+-    call    restore_xregs
++
++    GS_REL_CALL_SYMBOL restore_xregs_abs
+     add     $(4*SE_WORDSIZE), %xsp
+ 
+     /* switch to C code */
+ #ifdef LINUX64
+-    mov     -6*SE_WORDSIZE(%xbp), %xdi  /* index */
+-    mov     -5*SE_WORDSIZE(%xbp), %xsi  /* ms */
+-    mov     -4*SE_WORDSIZE(%xbp), %xdx  /* TCS */
+-    mov     -3*SE_WORDSIZE(%xbp), %xcx  /* cssa */
++    mov     %gs:-6*SE_WORDSIZE(%xbp), %xdi  /* index */
++    mov     %gs:-5*SE_WORDSIZE(%xbp), %xsi  /* ms */
++    mov     %gs:-4*SE_WORDSIZE(%xbp), %xdx  /* TCS */
++    mov     %gs:-3*SE_WORDSIZE(%xbp), %xcx  /* cssa */
+ #endif
+-    call    enter_enclave
+-    mov     %xax, %xbx
++
++    GS_REL_CALL_SYMBOL enter_enclave
++    mov %xax, %xbx
+ 
+ .Lexit_enclave:
+ /* clean extended feature registers */
+@@ -187,7 +216,12 @@ DECLARE_GLOBAL_FUNC enclave_entry
+ #ifdef LINUX32
+     mov     %xdi, (%xsp)
+ #endif
+-    call    restore_xregs
++    GS_REL_CALL_SYMBOL restore_xregs_abs
++
++
++    lea_pic __ImageBase, %xax
++    add %rax, %rsp
++    add %rax, %rbp
+ 
+ /* set xdi and xsi */
+     mov     $OCMD_ERET, %xdi
+@@ -290,13 +324,13 @@ DECLARE_LOCAL_FUNC do_ocall
+  * 1 for OCALL_FLAG, 4 for shadow space.
+  * Stack Pointer is 16-byte aligned under x86_64.
+  */
+-    push    %xbp
++    GS_REL_PUSH %xbp
+     mov     %xsp, %xbp
+ 
+ /* save parameters in stack */
+ #ifdef LINUX64
+-    mov     %xdi, 2*SE_WORDSIZE(%xbp)
+-    mov     %xsi, 3*SE_WORDSIZE(%xbp)
++    mov     %xdi, %gs:2*SE_WORDSIZE(%xbp)
++    mov     %xsi, %gs:3*SE_WORDSIZE(%xbp)
+ #endif
+ 
+ /* save and clean extended feature registers */
+@@ -308,40 +342,42 @@ DECLARE_LOCAL_FUNC do_ocall
+     mov     %xsp, %xcx                 # xsave pointer
+ 
+     sub     $(20*SE_WORDSIZE), %xsp    /* 20 slots for GPRs and other info */
+-    mov     %xcx, SE_WORDSIZE*19(%xsp) /* addr for xsave */
++    mov     %xcx, %gs:SE_WORDSIZE*19(%xsp) /* addr for xsave */
+ /* save non-volatile registers, except xsp */
+-    mov     %xbx, SE_WORDSIZE*14(%xsp)
+-    mov     %xsi, SE_WORDSIZE*13(%xsp)
+-    mov     %xdi, SE_WORDSIZE*12(%xsp)
+-    mov     %xbp, SE_WORDSIZE*11(%xsp)
++    mov     %xbx, %gs:SE_WORDSIZE*14(%xsp)
++    mov     %xsi, %gs:SE_WORDSIZE*13(%xsp)
++    mov     %xdi, %gs:SE_WORDSIZE*12(%xsp)
++    mov     %xbp, %gs:SE_WORDSIZE*11(%xsp)
+ 
+ #ifdef LINUX64
+-    mov     %r12, SE_WORDSIZE*10(%rsp)
+-    mov     %r13, SE_WORDSIZE* 9(%rsp)
+-    mov     %r14, SE_WORDSIZE* 8(%rsp)
+-    mov     %r15, SE_WORDSIZE* 7(%rsp)
++    mov     %r12, %gs:SE_WORDSIZE*10(%rsp)
++    mov     %r13, %gs:SE_WORDSIZE* 9(%rsp)
++    mov     %r14, %gs:SE_WORDSIZE* 8(%rsp)
++    mov     %r15, %gs:SE_WORDSIZE* 7(%rsp)
+ #endif
+ 
+ /* save and clean extended feature registers */
+-    mov     SE_WORDSIZE*19(%xsp), %xdi /* xsave pointer */
++    mov     %gs:SE_WORDSIZE*19(%xsp), %xdi /* xsave pointer */
+     READ_TD_DATA xsave_size
+     mov     %xax, %xcx
+     shr     $2, %xcx                   /* xsave size in dword */
++    GS_REL_GET_BASE %rax
++    add     %rax, %rdi
+     xor     %xax, %xax
+     cld
+     rep stos %eax, %es:(%xdi)
+ 
+-    mov     SE_WORDSIZE*19(%xsp), %xdi # xsave pointer
+-    mov     %xdi, (%xsp)
+-    call    save_xregs
++    mov     %gs:SE_WORDSIZE*19(%xsp), %xdi # xsave pointer
++    mov     %xdi, %gs:(%xsp)
++    GS_REL_CALL_SYMBOL save_xregs
+     lea_pic SYNTHETIC_STATE, %xdi
+-    mov     %xdi, (%xsp)
+-    call    restore_xregs
++    mov     %xdi, %gs:(%xsp)
++    GS_REL_CALL_SYMBOL restore_xregs_abs
+ 
+     /* set xdi and xsi using the input parameters */
+ #ifdef LINUX64
+-    mov     SE_WORDSIZE*12(%xsp), %xdi
+-    mov     SE_WORDSIZE*13(%xsp), %xsi
++    mov     %gs:SE_WORDSIZE*12(%xsp), %xdi
++    mov     %gs:SE_WORDSIZE*13(%xsp), %xsi
+ #else
+     mov     SE_WORDSIZE*2(%ebp), %edi
+     mov     SE_WORDSIZE*3(%ebp), %esi
+@@ -349,8 +385,8 @@ DECLARE_LOCAL_FUNC do_ocall
+ 
+     /* save ocall index to the stack */
+     mov     $OCALL_FLAG, %xax
+-    mov     %xax, SE_WORDSIZE*4(%xsp)   /* save OCALL_FLAG */
+-    mov     %xdi, SE_WORDSIZE*5(%xsp)   /* save ocall_index */
++    mov     %xax, %gs:SE_WORDSIZE*4(%xsp)   /* save OCALL_FLAG */
++    mov     %xdi, %gs:SE_WORDSIZE*5(%xsp)   /* save ocall_index */
+ 
+     /*
+      * save the inside stack context
+@@ -367,17 +403,17 @@ DECLARE_LOCAL_FUNC do_ocall
+     mov     %xsp, %xdi
+ #endif
+     
+-    call    update_ocall_lastsp         /* xax: td.last_sp */
++    GS_REL_CALL_SYMBOL    update_ocall_lastsp         /* xax: td.last_sp */
+ 
+ #ifdef LINUX64
+-    mov     SE_WORDSIZE*12(%xsp), %xdi   /* restore xdi */
+-    mov     SE_WORDSIZE*13(%xsp), %xsi   /* restore xdi */
++    mov     %gs:SE_WORDSIZE*12(%xsp), %xdi   /* restore xdi */
++    mov     %gs:SE_WORDSIZE*13(%xsp), %xsi   /* restore xdi */
+ #endif
+ 
+     /* restore outside stack context */
+-    mov     first_ssa_gpr(%xbx), %xdx
+-    mov     ssa_bp_u(%xdx), %xbp
+-    mov     ssa_sp_u(%xdx), %xsp
++    mov     %gs:first_ssa_gpr(%xbx), %xdx
++    mov     %gs:ssa_bp_u(%xdx), %xbp
++    mov     %gs:ssa_sp_u(%xdx), %xsp
+     /*
+      * set EEXIT registers
+      * return address can be read from the ECALL frame:
+@@ -388,10 +424,15 @@ DECLARE_LOCAL_FUNC do_ocall
+      *                    | xsp_u       |
+      *                    | ...         |
+      */
+-    mov     -1*SE_WORDSIZE(%xax), %xbx  /* return address */
++    mov     %gs:-1*SE_WORDSIZE(%xax), %xbx  /* return address */
+     mov     $SE_EEXIT, %xax             /* EEXIT leaf */
+ 
+     /* Clear all GPRs, except xax, xbx, xdi, and xsi*/
++
++    /* adopt ms */
++    GS_REL_GET_BASE %rcx
++    add             %rcx, %rsi
++    
+     xor     %xcx, %xcx
+     xor     %xdx, %xdx
+ #ifdef LINUX64
+@@ -419,7 +460,7 @@ DECLARE_LOCAL_FUNC do_ocall
+  */
+ DECLARE_LOCAL_FUNC __morestack
+     .cfi_startproc
+-    push %xbp
++    GS_REL_PUSH %rbp
+     .cfi_def_cfa_offset     2*SE_WORDSIZE
+     .cfi_offset             xbp,-2*SE_WORDSIZE
+     mov %xsp, %xbp
+@@ -432,53 +473,58 @@ DECLARE_LOCAL_FUNC __morestack
+     mov (3*SE_WORDSIZE)(%xbp), %xax
+     mov %xax, (1*SE_WORDSIZE)(%xsp)
+ #endif
+-    call        do_ocall
+-    leave
+-    ret
++    GS_REL_CALL_SYMBOL do_ocall
++    GS_REL_LEAVE
++    GS_REL_RET
+     .cfi_endproc
+ 
+ DECLARE_GLOBAL_FUNC asm_oret
+     mov     %xsp, %xbx
+ #ifdef LINUX64
+-    mov     %xdi, SE_WORDSIZE(%xsp)
+-    mov     %xsi, 2*SE_WORDSIZE(%xsp)
++    mov     %xdi, %gs:SE_WORDSIZE(%xsp)
++    mov     %xsi, %gs:2*SE_WORDSIZE(%xsp)
+ #endif
+-    mov     SE_WORDSIZE(%xbx), %xsp    /* restore thread_data.last_sp */
++    mov     %gs:SE_WORDSIZE(%xbx), %xsp    /* restore thread_data.last_sp */
+ 
+ /* restore extended feature registers */
+-    mov     19*SE_WORDSIZE(%xsp), %xdi
++    mov     %gs:19*SE_WORDSIZE(%xsp), %xdi
+ #ifdef LINUX32
+     mov     %xdi, (%xsp)
+ #endif
+-    call    restore_xregs
++    GS_REL_CALL_SYMBOL restore_xregs
+ 
+ /* memset_s */
+-    xor     %xax, %xax
+-    mov     11*SE_WORDSIZE(%xsp), %xcx
++    
++    mov     %gs:11*SE_WORDSIZE(%xsp), %xcx
+     sub     %xdi, %xcx
+     sub     $SE_WORDSIZE, %xcx
+     shr     $2, %xcx
++    GS_REL_GET_BASE %xax
++    add     %xax, %xdi
++    xor     %xax, %xax
+     cld
+     rep stos %eax,%es:(%xdi)
+ 
+-    mov     2*SE_WORDSIZE(%xbx), %xax  /* ocall return value */
+-
++    /* here ms is not a pointer its the status from the ocall! */
++    lea_pic __ImageBase, %rax
++    add     %gs:2*SE_WORDSIZE(%xbx), %xax  /* ocall return value */
++    
+ #ifdef LINUX64
+-    mov     7*SE_WORDSIZE(%xsp), %r15
+-    mov     8*SE_WORDSIZE(%xsp), %r14
+-    mov     9*SE_WORDSIZE(%xsp), %r13
+-    mov    10*SE_WORDSIZE(%xsp), %r12
++    mov    %gs: 7*SE_WORDSIZE(%xsp), %r15
++    mov    %gs: 8*SE_WORDSIZE(%xsp), %r14
++    mov    %gs: 9*SE_WORDSIZE(%xsp), %r13
++    mov    %gs:10*SE_WORDSIZE(%xsp), %r12
+ #endif
+ 
+-    mov    11*SE_WORDSIZE(%xsp), %xbp
+-    mov    12*SE_WORDSIZE(%xsp), %xdi
+-    mov    13*SE_WORDSIZE(%xsp), %xsi
+-    mov    14*SE_WORDSIZE(%xsp), %xbx
++    mov    %gs:11*SE_WORDSIZE(%xsp), %xbp
++    mov    %gs:12*SE_WORDSIZE(%xsp), %xdi
++    mov    %gs:13*SE_WORDSIZE(%xsp), %xsi
++    mov    %gs:14*SE_WORDSIZE(%xsp), %xbx
+ 
+     mov     %xbp, %xsp
+-    pop     %xbp
++    GS_REL_POP %xbp
+ 
+-    ret
++    GS_REL_RET
+     /* should not come here */
+     ud2
+ 
+@@ -520,13 +566,34 @@ DECLARE_LOCAL_FUNC do_egetkey
+  */
+ .global Lereport_inst
+ DECLARE_LOCAL_FUNC do_ereport
++
++    lea_pic __ImageBase, %rax
++    add %rax, %rsp
++    add %rax, %rbp
++    add %rax, %rdi
++    add %rax, %rsi
++    add %rax, %rdx
++
+     SE_PROLOG
++    
+     mov       $SE_EREPORT, %xax  /* EREPORT leaf */
+     clc
+ Lereport_inst:
+     ENCLU
+     setc      %al
+-    SE_EPILOG
++
++    pop     %rdx
++    pop     %rcx
++    pop     %rbx
++
++    lea_pic __ImageBase, %rcx
++    sub %rcx, %rsp
++    sub %rcx, %rbp
++   
++    mov %gs:(%rsp), %rcx
++    add $8, %rsp
++    jmp *%rcx
++    .cfi_endproc
+     
+ DECLARE_GLOBAL_FUNC do_eaccept
+     SE_PROLOG
+@@ -559,16 +626,16 @@ DECLARE_LOCAL_FUNC do_rdrand
+     dec	%ecx
+     jnz 	.Lrdrand_retry
+     xor 	%xax, %xax
+-    ret
++    GS_REL_RET
+ .Lrdrand_return:
+ #ifdef LINUX32
+     mov     SE_WORDSIZE(%esp), %ecx
+ #else
+     mov     %rdi, %rcx
+ #endif
+-    movl    %eax, (%xcx)
++    movl    %eax, %gs:(%xcx)
+     mov     $1, %xax
+-    ret
++    GS_REL_RET
+ 
+ /*
+  * -------------------------------------------------------------------------
+diff --git a/sdk/trts/linux/trts_pic.h b/sdk/trts/linux/trts_pic.h
+index 55fd29a9..5003aea7 100644
+--- a/sdk/trts/linux/trts_pic.h
++++ b/sdk/trts/linux/trts_pic.h
+@@ -103,7 +103,7 @@
+ #if defined(LINUX32)
+     mov     %fs:\offset, %xax
+ #elif defined(LINUX64)
+-    mov     %gs:\offset, %xax
++    mov     %fs:\offset, %xax
+ #endif
+ 
+ #endif /* !SE_SIM */
+diff --git a/sdk/trts/trts.cpp b/sdk/trts/trts.cpp
+index 602f1fbc..55887c6a 100644
+--- a/sdk/trts/trts.cpp
++++ b/sdk/trts/trts.cpp
+@@ -190,13 +190,13 @@ void * sgx_ocalloc(size_t size)
+         // So update the outside stack address before probe the page
+         ssa_gpr->REG(sp_u) = page;
+ 
+-        *reinterpret_cast<uint8_t *>(page) = 0;
++        *reinterpret_cast<uint8_t *>(page - get_real_enclave_base()) = 0;
+     }
+ 
+     // update the outside stack address in the SSA to the allocated address
+     ssa_gpr->REG(sp_u) = addr;
+ 
+-    return reinterpret_cast<void *>(addr);
++    return reinterpret_cast<void *>(addr - get_real_enclave_base());
+ }
+ 
+ // sgx_ocfree()
+diff --git a/sdk/trts/trts_add_trim.cpp b/sdk/trts/trts_add_trim.cpp
+index eb3fe730..04cd538c 100644
+--- a/sdk/trts/trts_add_trim.cpp
++++ b/sdk/trts/trts_add_trim.cpp
+@@ -473,7 +473,7 @@ sgx_status_t do_add_thread(void *ptcs)
+     //Adjust the tcs fields
+     tcs->ossa = (size_t)GET_PTR(size_t, (void *)tcs, tcs->ossa) - enclave_base;
+     tcs->ofs_base = (size_t)GET_PTR(size_t, (void *)tcs, tcs->ofs_base) - enclave_base;
+-    tcs->ogs_base = (size_t)GET_PTR(size_t, (void *)tcs, tcs->ogs_base) - enclave_base;
++    //tcs->ogs_base = (size_t)GET_PTR(size_t, (void *)tcs, tcs->ogs_base) - enclave_base;
+ 
+     //OCALL for MKTCS
+     ret = sgx_ocall(0, tcs);
+diff --git a/sdk/trts/trts_ecall.cpp b/sdk/trts/trts_ecall.cpp
+index d0791329..407926b0 100644
+--- a/sdk/trts/trts_ecall.cpp
++++ b/sdk/trts/trts_ecall.cpp
+@@ -114,9 +114,10 @@ static sgx_status_t get_func_addr(uint32_t ordinal, void **addr)
+     {
+         return status;
+     }
+-
+-    *addr = const_cast<void *>(g_ecall_table.ecall_table[ordinal].ecall_addr);
+-    if(!sgx_is_within_enclave(*addr, 0))
++    void *ecall_addr = const_cast<void *>(g_ecall_table.ecall_table[ordinal].ecall_addr);
++    *addr = ecall_addr;
++    //ecall_addr = (void*)((uint64_t)ecall_addr - get_real_enclave_base());
++    if(!sgx_is_within_enclave(ecall_addr, 0))
+     {
+         return SGX_ERROR_UNEXPECTED;
+     }
+diff --git a/sdk/trts/trts_internal.h b/sdk/trts/trts_internal.h
+index f9536772..ad4c2795 100644
+--- a/sdk/trts/trts_internal.h
++++ b/sdk/trts/trts_internal.h
+@@ -46,6 +46,9 @@ extern entry_table_t g_dyn_entry_table;
+ 
+ int lock_enclave();
+ void *get_enclave_base();
++
++uint64_t get_real_enclave_base();
++
+ int get_enclave_state();
+ void set_enclave_state(int state);
+ 
+@@ -59,6 +62,71 @@ sgx_status_t do_uninit_enclave(void *tcs);
+ int check_static_stack_canary(void *tcs);
+ sgx_status_t _pthread_thread_run(void* ms);
+ 
++
++#define REL_PC_CALL_CORE(_symbol)                \
++    "lea 1f(%%rip), %%rax \n"                    \
++    "sub $136, %%rsp \n"                         \
++    "mov %%rax, %%gs:(%%rsp) \n"                 \
++    "mov " #_symbol "@GOTPCREL(%%rip), %%rax \n" \
++    "jmp *%%rax \n"                              \
++    "1: \n"                                      \
++    "add $128, %%rsp \n"                         
++
++#define REL_PC_CALL_R_0(_ret,_symbol)                \
++asm volatile(                                        \
++    REL_PC_CALL_CORE(_symbol)                        \
++    : "=a"(_ret)                                     \
++    :: "rcx","rdx","rsi","rdi","r8","r9","r10","r11" \
++)
++
++#define REL_PC_CALL_R_1(_ret,_symbol,_a0)     \
++asm volatile(                                 \
++    REL_PC_CALL_CORE(_symbol)                 \
++    : "=a"(_ret)                              \
++    : "D"(_a0)                                \
++    : "rcx","rdx","rsi","r8","r9","r10","r11" \
++)
++
++#define REL_PC_CALL_R_2(_ret,_symbol,_a0,_a1) \
++asm volatile(                                 \
++    REL_PC_CALL_CORE(_symbol)                 \
++    : "=a"(_ret)                              \
++    : "D"(_a0), "S"(_a1)                      \
++    : "rcx","rdx","r8","r9","r10","r11"       \
++)
++
++#define REL_PC_CALL_R_4(_ret,_symbol,_a0,_a1,_a2,_a3) \
++asm volatile(                                 \
++    REL_PC_CALL_CORE(_symbol)                 \
++    : "=a"(_ret)                              \
++    : "D"(_a0), "S"(_a1), "d"(_a2), "c"(_a3)  \
++    : "r8","r9","r10","r11"                   \
++)
++
++
++#define REL_PC_CALL_1(_symbol,_a0)            \
++asm volatile(                                 \
++    REL_PC_CALL_CORE(_symbol)                 \
++    :: "D"(_a0)                               \
++    : "rcx","rdx","rsi","r8","r9","r10","r11" \
++)
++
++#define GET_ENCLAVE_STATE(_state)            \
++asm volatile(                                \
++    "lea g_enclave_state(%%rip), %%rax \n"   \
++    "movl (%%rax), %0 \n"                    \
++    : "=r"(_state)                           \
++    :: "rax"                                 \
++)
++
++#define SET_ENCLAVE_STATE(_state)            \
++asm volatile(                                \
++    "lea g_enclave_state(%%rip), %%rax \n"   \
++    "movl %0, (%%rax) \n"                    \
++    :: "r"(_state)                           \
++    : "rax"                                  \
++)
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/sdk/trts/trts_nsp.cpp b/sdk/trts/trts_nsp.cpp
+index a3445130..948fc00d 100644
+--- a/sdk/trts/trts_nsp.cpp
++++ b/sdk/trts/trts_nsp.cpp
+@@ -75,30 +75,50 @@ extern "C" int enter_enclave(int index, void *ms, void *tcs, int cssa) __attribu
+ 
+ extern "C" int enter_enclave(int index, void *ms, void *tcs, int cssa)
+ {
++    asm volatile(""::"r"(&get_enclave_state):"memory");
++    asm volatile(""::"r"(&set_enclave_state):"memory");
++    asm volatile(""::"r"(&do_init_enclave):"memory");
++
+     sgx_status_t error = SGX_ERROR_UNEXPECTED;
+ 
+-    if(sgx_is_enclave_crashed())
++    int state;
++    state = get_enclave_state();
++    //REL_PC_CALL_R_0(state, get_enclave_state);
++
++
++    if(state == ENCLAVE_CRASHED)
+     {
+         return SGX_ERROR_ENCLAVE_CRASHED;
+     }
+-    if((ECMD_INIT_ENCLAVE != index) && (ENCLAVE_INIT_DONE != get_enclave_state()))
++    if((ECMD_INIT_ENCLAVE != index) && (ENCLAVE_INIT_DONE != state))
+     {
+-        set_enclave_state(ENCLAVE_CRASHED);
++        state = ENCLAVE_CRASHED;
++        set_enclave_state(state);
++        //REL_PC_CALL_1(set_enclave_state, state);
++        
++        //SET_ENCLAVE_STATE(state);
+         return error;
+     }
+ 
++    if(cssa == 0 && index == ECMD_INIT_ENCLAVE) {
++        error = do_init_enclave(ms, tcs);
++        ///REL_PC_CALL_R_2(error, do_init_enclave, ms, tcs);
++    }
++    else 
+     if(cssa == 0)
+     {
++
++        
+         if((index >= 0) || (index == ECMD_ECALL_PTHREAD))
+         {
+             // Initialize stack guard if necessary
+             init_stack_guard(tcs);
+             error = do_ecall(index, ms, tcs);
+         }
+-        else if(index == ECMD_INIT_ENCLAVE)
++        /*else if(index == ECMD_INIT_ENCLAVE)
+         {
+-            error = do_init_enclave(ms, tcs);
+-        }
++            REL_PC_CALL_R_2(error, do_init_enclave, ms, tcs);
++        }*/
+         else if(index == ECMD_ORET)
+         {
+             error = do_oret(ms);
+@@ -122,7 +142,9 @@ extern "C" int enter_enclave(int index, void *ms, void *tcs, int cssa)
+     }
+     if(error == SGX_ERROR_UNEXPECTED)
+     {
+-        set_enclave_state(ENCLAVE_CRASHED);
++        state = ENCLAVE_CRASHED;
++        set_enclave_state(state);
++        //REL_PC_CALL_1(set_enclave_state, state);
+     }
+     return error;
+ }
+diff --git a/sdk/tseal/linux/Makefile b/sdk/tseal/linux/Makefile
+index a97a67c2..3b285bf8 100644
+--- a/sdk/tseal/linux/Makefile
++++ b/sdk/tseal/linux/Makefile
+@@ -31,7 +31,7 @@
+ 
+ include ../../../buildenv.mk
+ 
+-CXXFLAGS += $(ENCLAVE_CXXFLAGS) -Werror -fno-rtti -fno-exceptions
++CXXFLAGS += $(ENCLAVE_CXXFLAGS) -fno-rtti -fno-exceptions
+ 
+ CPPFLAGS := -I$(COMMON_DIR)/inc/                    \
+             -I$(COMMON_DIR)/inc/internal/           \

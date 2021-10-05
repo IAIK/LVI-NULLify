@@ -6,7 +6,6 @@ sgx_directory=$script_directory/../linux-sgx
 
 set -e
 
-
 #uninstall sdk/psw
 $script_directory/uninstall_psw_sdk.sh
 

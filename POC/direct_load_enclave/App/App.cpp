@@ -151,7 +151,6 @@ void ocall_modify_page(void *ptr)
   vm.pte &= ~(1ull << PTEDIT_PAGE_BIT_ACCESSED);
   vm.valid = PTEDIT_VALID_MASK_PTE;
   ptedit_update(aligned_addr, 0, &vm);
-  maccess(0);
 }
 
 void ocall_check_oracle(int dummy)
@@ -216,16 +215,6 @@ int SGX_CDECL main(int argc, char *argv[])
   {
     return -1;
   }
-
-  //setup nullpage
-  //we have to trick the compiler optimization for O3, otherwise it detects Null pointer access and palces a ud2 instruction
-  char *null_page = (char*)7;
-  volatile int a = -1;
-  null_page += 7*a;
-
-  mprotect(0, 4096, PROT_READ | PROT_WRITE | PROT_EXEC);
-  memset((void *)null_page, LEAKAGE_CHAR, 4096);
-
 
   ecall_do_something(global_eid, oracle);
 

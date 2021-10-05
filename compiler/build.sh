@@ -6,7 +6,7 @@ cd llvm11 && mkdir build
 patch -p1 < ../llvm-lvi-nullify.patch
 cd build
 cmake ../llvm -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_PROJECTS=clang -DENABLE_EXPERIMENTAL_NEW_PASS_MANAGER=true
-ninja
+ninja clang
 
 cd ../..
 

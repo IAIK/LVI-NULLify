@@ -1,4 +1,4 @@
-# 0 LVINullify
+# LVINullify
 
 This is the PoC implementation for the USENIX 2022 paper
 

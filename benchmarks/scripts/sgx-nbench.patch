@@ -1,0 +1,1180 @@
+diff -ruN template/sgx-nbench/App/App.cpp template2/sgx-nbench/App/App.cpp
+--- template/sgx-nbench/App/App.cpp	2021-10-12 00:08:00.445279095 +0200
++++ template2/sgx-nbench/App/App.cpp	2021-10-04 14:07:32.000000000 +0200
+@@ -5,7 +5,7 @@
+ #include <pwd.h>
+ #define MAX_PATH FILENAME_MAX
+ #include "sgx_urts.h"
+-#include "sgx_status.h"
++//#include "sgx_status.h"
+ #include "App.h"
+ #include "Enclave_u.h"
+ 
+@@ -71,7 +71,7 @@
+ 
+     /* Step 2: call sgx_create_enclave to initialize an enclave instance */
+     /* Debug Support: set 2nd parameter to 1 */
+-    ret = sgx_create_enclave(ENCLAVE_FILENAME, SGX_DEBUG_FLAG, &token, &updated, &global_eid, NULL);
++    ret = sgx_create_enclave("Enclave.signed.so", 1, &token, &updated, &global_eid, NULL);
+ 
+ 
+     /* Step 3: save the launch token if it is updated */
+diff -ruN template/sgx-nbench/Enclave/Enclave.cpp template2/sgx-nbench/Enclave/Enclave.cpp
+--- template/sgx-nbench/Enclave/Enclave.cpp	2021-10-12 00:08:00.445279095 +0200
++++ template2/sgx-nbench/Enclave/Enclave.cpp	2021-10-04 14:07:32.000000000 +0200
+@@ -211,7 +211,7 @@
+ 		farvoid *source,        /* Source address */
+ 		unsigned long nbytes)
+ {
+-memmove(destination, source, nbytes);
++	memmove(destination, source, nbytes);
+ }
+ 
+ 
+@@ -494,6 +494,7 @@
+ 	else
+ 		i=j+1;
+ }
++
+ return;
+ }
+ extern "C" {
+@@ -1234,6 +1235,12 @@
+     ocall_print_string(buf);
+ }
+ 
++extern "C" void puts(char *c)
++{
++    ocall_print_string(c);
++}
++
++
+ 
+ /*************************
+ ** LoadNumArrayWithRand **
+diff -ruN template/sgx-nbench/Enclave/Enclave.edl template2/sgx-nbench/Enclave/Enclave.edl
+--- template/sgx-nbench/Enclave/Enclave.edl	2021-10-12 00:08:00.449279160 +0200
++++ template2/sgx-nbench/Enclave/Enclave.edl	2021-10-04 14:07:32.000000000 +0200
+@@ -2,7 +2,7 @@
+ 
+ enclave {
+     
+-    include "user_types.h" /* buffer_t */
++    //include "user_types.h" /* buffer_t */
+ 
+     trusted {
+         public void test_function([in,string] const char *str);
+diff -ruN template/sgx-nbench/Enclave/Enclave_gs.config.xml template2/sgx-nbench/Enclave/Enclave_gs.config.xml
+--- template/sgx-nbench/Enclave/Enclave_gs.config.xml	1970-01-01 01:00:00.000000000 +0100
++++ template2/sgx-nbench/Enclave/Enclave_gs.config.xml	2021-10-04 14:07:32.000000000 +0200
+@@ -0,0 +1,12 @@
++<!-- Please refer to User's Guide for the explanation of each field -->
++<EnclaveConfiguration>
++  <ProdID>0xdead</ProdID>
++  <ISVSVN>0</ISVSVN>
++  <StackMaxSize>0x40000</StackMaxSize>
++  <HeapMaxSize>0x100000</HeapMaxSize>
++  <TCSNum>10</TCSNum>
++  <TCSPolicy>1</TCSPolicy>
++  <DisableDebug>0</DisableDebug>
++  <MiscSelect>0</MiscSelect>
++  <MiscMask>0xFFFFFFFF</MiscMask>
++</EnclaveConfiguration>
+diff -ruN template/sgx-nbench/Makefile template2/sgx-nbench/Makefile
+--- template/sgx-nbench/Makefile	2021-10-12 00:08:00.449279160 +0200
++++ template2/sgx-nbench/Makefile	2021-10-04 14:07:32.000000000 +0200
+@@ -1,10 +1,17 @@
+ ######## SGX SDK Settings ########
+ 
++NBENCHDIR = nbenchPortal/
++
++TR_CC ?= ../../compiler/clang-gs
++TR_CXX ?= ../../compiler/clang-gs++
++DR ?= ../../dr_frankenstein/target/release/dr_frankenstein
++
+ SGX_SDK ?= /opt/intel/sgxsdk
+-SGX_ARCH ?= x64
+ SGX_MODE ?= HW
+-SGX_PRERELEASE ?= 1
+-NBENCHDIR = nbenchPortal/
++SGX_ARCH ?= x64
++SGX_DEBUG ?= 1
++
++include $(SGX_SDK)/buildenv.mk
+ 
+ ifeq ($(shell getconf LONG_BIT), 32)
+ 	SGX_ARCH := x86
+@@ -12,13 +19,14 @@
+ 	SGX_ARCH := x86
+ endif
+ 
++
+ ifeq ($(SGX_ARCH), x86)
+-	SGX_COMMON_CFLAGS := -m32
++	SGX_COMMON_FLAGS := -m32
+ 	SGX_LIBRARY_PATH := $(SGX_SDK)/lib
+ 	SGX_ENCLAVE_SIGNER := $(SGX_SDK)/bin/x86/sgx_sign
+ 	SGX_EDGER8R := $(SGX_SDK)/bin/x86/sgx_edger8r
+ else
+-	SGX_COMMON_CFLAGS := -m64
++	SGX_COMMON_FLAGS := -m64
+ 	SGX_LIBRARY_PATH := $(SGX_SDK)/lib64
+ 	SGX_ENCLAVE_SIGNER := $(SGX_SDK)/bin/x64/sgx_sign
+ 	SGX_EDGER8R := $(SGX_SDK)/bin/x64/sgx_edger8r
+@@ -31,11 +39,20 @@
+ endif
+ 
+ ifeq ($(SGX_DEBUG), 1)
+-        SGX_COMMON_CFLAGS += -O0 -g
++        SGX_COMMON_FLAGS += -O0asdadsas
+ else
+-        SGX_COMMON_CFLAGS += -O2
++        SGX_COMMON_FLAGS += -O3 -fno-builtin
+ endif
+ 
++#
++
++SGX_COMMON_FLAGS += -Wall -Wextra -Winit-self -Wpointer-arith -Wreturn-type \
++                    -Waddress -Wsequence-point -Wformat-security \
++                    -Wmissing-include-dirs -Wfloat-equal -Wundef -Wshadow \
++                    -Wcast-align -Wcast-qual -Wconversion -Wredundant-decls
++SGX_COMMON_CFLAGS := $(SGX_COMMON_FLAGS) -Wstrict-prototypes -Wunsuffixed-float-constants #-Wjump-misses-init 
++SGX_COMMON_CXXFLAGS := $(SGX_COMMON_FLAGS) -Wnon-virtual-dtor -std=c++11
++
+ ######## App Settings ########
+ 
+ ifneq ($(SGX_MODE), HW)
+@@ -44,12 +61,10 @@
+ 	Urts_Library_Name := sgx_urts
+ endif
+ 
+-App_Cpp_Files := App/App.cpp $(wildcard App/Edger8rSyntax/*.cpp) $(wildcard App/TrustedLibrary/*.cpp)
+-App_Include_Paths := -IInclude -IApp -I$(SGX_SDK)/include -InbenchPortal
+-
+-App_C_Files := $(wildcard nbenchPortal/*.c)
++App_Cpp_Files := App/App.cpp
++App_Include_Paths := -IApp -I$(SGX_SDK)/include
+ 
+-App_C_Flags := $(SGX_COMMON_CFLAGS) -fPIC -Wno-attributes $(App_Include_Paths)
++App_C_Flags := -fPIC -Wno-attributes $(App_Include_Paths) -g
+ 
+ # Three configuration modes - Debug, prerelease, release
+ #   Debug - Macro DEBUG enabled.
+@@ -63,72 +78,122 @@
+         App_C_Flags += -DNDEBUG -UEDEBUG -UDEBUG
+ endif
+ 
+-App_Cpp_Flags := $(App_C_Flags) -std=c++11
+-App_Link_Flags := $(SGX_COMMON_CFLAGS) -L$(SGX_LIBRARY_PATH) -l$(Urts_Library_Name) -lpthread 
+-
+-ifneq ($(SGX_MODE), HW)
+-	App_Link_Flags += -lsgx_uae_service_sim
+-else
+-	App_Link_Flags += -lsgx_uae_service
+-endif
++App_Cpp_Flags := $(App_C_Flags)
++App_Link_Flags := -L$(SGX_LIBRARY_PATH) -l$(Urts_Library_Name) -lpthread 
+ 
+ App_Cpp_Objects := $(App_Cpp_Files:.cpp=.o)
+-App_C_Objects := $(App_C_Files:.c=.o)
+-App_Name := app
++
++App_Name := main
+ 
+ ######## Enclave Settings ########
+ 
+ ifneq ($(SGX_MODE), HW)
+ 	Trts_Library_Name := sgx_trts_sim
+ 	Service_Library_Name := sgx_tservice_sim
+-	Crypto_Library_Name := sgx_tcrypto
+ else
+ 	Trts_Library_Name := sgx_trts
+ 	Service_Library_Name := sgx_tservice
+-	Crypto_Library_Name := sgx_tcrypto
+ endif
++Crypto_Library_Name := sgx_tcrypto
+ 
+-Enclave_Cpp_Files := Enclave/Enclave.cpp $(wildcard Enclave/Edger8rSyntax/*.cpp) $(wildcard Enclave/TrustedLibrary/*.cpp)
+-Enclave_Include_Paths := -IInclude -IEnclave -I$(SGX_SDK)/include -I$(SGX_SDK)/include/tlibc -I$(SGX_SDK)/include/stlport -I$(NBENCHDIR)
++Enclave_Cpp_Files := Enclave/Enclave.cpp
++Enclave_Include_Paths := -IEnclave -I$(SGX_SDK)/include -I$(SGX_SDK)/include/tlibc -I$(SGX_SDK)/include/libcxx -I$(NBENCHDIR)
+ 
+-Enclave_C_Flags := $(SGX_COMMON_CFLAGS) -nostdinc -fvisibility=hidden -fpie -fstack-protector $(Enclave_Include_Paths)
+-Enclave_Cpp_Flags := $(Enclave_C_Flags) -std=c++03 -nostdinc++
+-Enclave_Link_Flags := $(SGX_COMMON_CFLAGS) -Wl,--no-undefined -nostdlib -nodefaultlibs -nostartfiles -L$(SGX_LIBRARY_PATH) \
++Enclave_C_Flags := $(Enclave_Include_Paths) -nostdinc -fvisibility=hidden  -ffunction-sections -fdata-sections $(MITIGATION_CFLAGS) 
++CC_BELOW_4_9 := $(shell expr "`$(CC) -dumpversion`" \< "4.9")
++ifeq ($(CC_BELOW_4_9), 1)
++	Enclave_C_Flags += -fstack-protector
++else
++	Enclave_C_Flags += -fstack-protector-strong
++endif
++
++Enclave_Cpp_Flags := $(Enclave_C_Flags) -nostdinc++
++
++# Enable the security flags
++Enclave_Security_Link_Flags := -Wl,-z,relro,-z,now,-z,noexecstack
++
++# To generate a proper Enclave, it is recommended to follow below guideline to link the trusted libraries:
++#    1. Link sgx_trts with the `--whole-archive' and `--no-whole-archive' options,
++#       so that the whole content of trts is included in the Enclave.
++#    2. For other libraries, you just need to pull the required symbols.
++#       Use `--start-group' and `--end-group' to link these libraries.
++# Do NOT move the libraries linked with `--start-group' and `--end-group' within `--whole-archive' and `--no-whole-archive' options.
++# Otherwise, you may get some undesirable errors.
++Enclave_Link_Flags := $(MITIGATION_LDFLAGS) $(Enclave_Security_Link_Flags) \
++    -Wl,--no-undefined -nostdlib -nodefaultlibs -nostartfiles -L$(SGX_TRUSTED_LIBRARY_PATH) \
+ 	-Wl,--whole-archive -l$(Trts_Library_Name) -Wl,--no-whole-archive \
+-	-Wl,--start-group -lsgx_tstdc -lsgx_tstdcxx -l$(Crypto_Library_Name) -l$(Service_Library_Name) -Wl,--end-group \
++	-Wl,--start-group -lsgx_tstdc -lsgx_tcxx -l$(Crypto_Library_Name) -l$(Service_Library_Name) -Wl,--end-group \
+ 	-Wl,-Bstatic -Wl,-Bsymbolic -Wl,--no-undefined \
+ 	-Wl,-pie,-eenclave_entry -Wl,--export-dynamic  \
+-	-Wl,--defsym,__ImageBase=0 \
++	-Wl,--defsym,__ImageBase=0 -Wl,--gc-sections \
+ 	-Wl,--version-script=Enclave/Enclave.lds
+ 
+-Enclave_Cpp_Objects := $(Enclave_Cpp_Files:.cpp=.o)
++Enclave_Cpp_Objects := $(sort $(Enclave_Cpp_Files:.cpp=.o)) Enclave/encl_emfloat.o
++
++Enclave_Name := Enclave.so
++Signed_Enclave_Name := Enclave.signed.so
++
++ifneq ($(DR),)
++	Enclave_Config_File := Enclave/Enclave_gs.config.xml
++else
++	Enclave_Config_File := Enclave/Enclave.config.xml
++	Enclave_C_Flags += -fpic
++	Enclave_Cpp_Flags += -fpic
++endif
+ 
+-Enclave_Name := enclave.so
+-Signed_Enclave_Name := enclave.signed.so
+-Enclave_Config_File := Enclave/Enclave.config.xml
+ 
+ ifeq ($(SGX_MODE), HW)
+-ifneq ($(SGX_DEBUG), 1)
+-ifneq ($(SGX_PRERELEASE), 1)
+-Build_Mode = HW_RELEASE
++ifeq ($(SGX_DEBUG), 1)
++	Build_Mode = HW_DEBUG
++else ifeq ($(SGX_PRERELEASE), 1)
++	Build_Mode = HW_PRERELEASE
++else
++	Build_Mode = HW_RELEASE
+ endif
++else
++ifeq ($(SGX_DEBUG), 1)
++	Build_Mode = SIM_DEBUG
++else ifeq ($(SGX_PRERELEASE), 1)
++	Build_Mode = SIM_PRERELEASE
++else
++	Build_Mode = SIM_RELEASE
+ endif
+ endif
+ 
++.SILENT:
++
++.PHONY: all target run
++all: .config_$(Build_Mode)_$(SGX_ARCH)
++	@$(MAKE) target
+ 
+-.PHONY: all run
++
++debug: all
++	/opt/intel/sgxsdk/bin/sgx-gdb ./main
+ 
+ ifeq ($(Build_Mode), HW_RELEASE)
+-all: $(App_Name) $(Enclave_Name)
++target:  $(App_Name) $(Enclave_Name)
+ 	@echo "The project has been built in release hardware mode."
+-	@echo "Please sign the $(Enclave_Name) first with your signing key before you run the $(App_Name) to launch and access the enclave."
+-	@echo "To sign the enclave use the command:"
++	@echo "Please sign the $(Enclave_Name) first with your signing key before you run the $(App_Name) to launch and access the Enclave."
++	@echo "To sign the Enclave use the command:"
+ 	@echo "   $(SGX_ENCLAVE_SIGNER) sign -key <your key> -enclave $(Enclave_Name) -out <$(Signed_Enclave_Name)> -config $(Enclave_Config_File)"
+-	@echo "You can also sign the enclave using an external signing tool. See User's Guide for more details."
++	@echo "You can also sign the enclave using an external signing tool."
+ 	@echo "To build the project in simulation mode set SGX_MODE=SIM. To build the project in prerelease mode set SGX_PRERELEASE=1 and SGX_MODE=HW."
++
++else
++target: $(App_Name) $(Signed_Enclave_Name)
++ifeq ($(Build_Mode), HW_DEBUG)
++	@echo "The project has been built in debug hardware mode."
++else ifeq ($(Build_Mode), SIM_DEBUG)
++	@echo "The project has been built in debug simulation mode."
++else ifeq ($(Build_Mode), HW_PRERELEASE)
++	@echo "The project has been built in pre-release hardware mode."
++else ifeq ($(Build_Mode), SIM_PRERELEASE)
++	@echo "The project has been built in pre-release simulation mode."
+ else
+-all: $(App_Name) $(Signed_Enclave_Name)
++	@echo "The project has been built in release simulation mode."
+ endif
++endif
++	
+ 
+ run: all
+ ifneq ($(Build_Mode), HW_RELEASE)
+@@ -136,18 +201,24 @@
+ 	@echo "RUN  =>  $(App_Name) [$(SGX_MODE)|$(SGX_ARCH), OK]"
+ endif
+ 
++.config_$(Build_Mode)_$(SGX_ARCH):
++	@rm -f .config_* App/$(App_Name) $(Enclave_Name) $(Signed_Enclave_Name) $(App_Cpp_Objects) App/Enclave_u.* $(Enclave_Cpp_Objects) Enclave/Enclave_t.*
++	@touch .config_$(Build_Mode)_$(SGX_ARCH)
++
+ ######## App Objects ########
+ 
+-App/Enclave_u.c: $(SGX_EDGER8R) Enclave/Enclave.edl
++App/Enclave_u.h: $(SGX_EDGER8R) Enclave/Enclave.edl
+ 	@cd App && $(SGX_EDGER8R) --untrusted ../Enclave/Enclave.edl --search-path ../Enclave --search-path $(SGX_SDK)/include
+ 	@echo "GEN  =>  $@"
+ 
++App/Enclave_u.c: App/Enclave_u.h
++
+ App/Enclave_u.o: App/Enclave_u.c
+-	@$(CC) $(App_C_Flags) -c $< -o $@
++	@$(CC) $(SGX_COMMON_CFLAGS) $(App_C_Flags) -c $< -o $@
+ 	@echo "CC   <=  $<"
+ 
+-App/%.o: App/%.cpp
+-	@$(CXX) $(App_Cpp_Flags) -c $< -o $@
++App/%.o: App/%.cpp  App/Enclave_u.h
++	@$(CXX) $(SGX_COMMON_CXXFLAGS) $(App_Cpp_Flags) -c $< -o $@
+ 	@echo "CXX  <=  $<"
+ 
+ $(App_Name): App/Enclave_u.o $(App_Cpp_Objects) 	
+@@ -160,32 +231,42 @@
+ 
+ ######## Enclave Objects ########
+ 
+-Enclave/Enclave_t.c: $(SGX_EDGER8R) Enclave/Enclave.edl
++Enclave/Enclave_t.h: $(SGX_EDGER8R) Enclave/Enclave.edl
+ 	@cd Enclave && $(SGX_EDGER8R) --trusted ../Enclave/Enclave.edl --search-path ../Enclave --search-path $(SGX_SDK)/include
+ 	@echo "GEN  =>  $@"
+ 
+-Enclave/Enclave_t.o: Enclave/Enclave_t.c 
+-	@$(CC) $(Enclave_C_Flags) -c $< -o $@
++Enclave/Enclave_t.c: Enclave/Enclave_t.h
++
++Enclave/Enclave_t.o: Enclave/Enclave_t.c
++	@$(TR_CC) $(SGX_COMMON_CFLAGS) $(Enclave_C_Flags) -c $< -o $@
+ 	@echo "CC   <=  $<"
+ 
+-Enclave/%.o: Enclave/%.cpp
+-	@$(CXX) $(Enclave_Cpp_Flags) -c $< -o $@
++Enclave/%.o: Enclave/%.cpp Enclave/Enclave_t.h
++	echo $(SGX_COMMON_CXXFLAGS) $(Enclave_Cpp_Flags)
++	@$(TR_CXX) $(SGX_COMMON_CXXFLAGS) $(Enclave_Cpp_Flags) -c $< -o $@
+ 	@echo "CXX  <=  $<"
+-
++	
+ Enclave/encl_emfloat.o:
+-	@$(CC) $(Enclave_C_Flags) $(Enclave_include_paths) Enclave/encl_emfloat.c -c -o $@
++	@$(TR_CC) $(Enclave_C_Flags) $(Enclave_include_paths) Enclave/encl_emfloat.c -c -o $@
++
++$(Enclave_Name): Enclave/Enclave_t.o $(Enclave_Cpp_Objects)
++	g++ $^ -o $@ $(Enclave_Link_Flags) 
++
++#adapt_relocations: $(TRTS_OBJS_MOD) $(TSTDC_OBJS_MOD) $(TSERVICE_OBJS)#
++#	ar rcs libsgx_trts_mod.a $(TRTS_OBJS_MOD)
++#	ar rcs libsgx_tstdc_mod.a $(TSTDC_OBJS_MOD)
++#	ar rcs libsgx_tservice_mod.a $(TSERVICE_OBJS)
+ 
+-$(Enclave_Name): Enclave/encl_emfloat.o Enclave/Enclave_t.o Enclave/encl_emfloat.o $(Enclave_Cpp_Objects) 
+-	@$(CXX) $^ -o $@ $(Enclave_Link_Flags)
+-	@echo "LINK =>  $@"
+ 
+ $(Signed_Enclave_Name): $(Enclave_Name)
+-	@$(SGX_ENCLAVE_SIGNER) sign -key Enclave/Enclave_private.pem -enclave $(Enclave_Name) -out $@ -config $(Enclave_Config_File)
++	@openssl genrsa -out Enclave/private.pem -3 3072
++	@openssl rsa -in Enclave/private.pem -pubout -out Enclave/public.pem
++	@$(SGX_ENCLAVE_SIGNER) sign -ignore-rel-error -key Enclave/private.pem -enclave $(Enclave_Name) -out $@ -config  $(Enclave_Config_File)
+ 	@echo "SIGN =>  $@"
+ 
+ .PHONY: clean
+ 
+ clean:
+-	$(MAKE) -C $(NBENCHDIR) clean
+-	@rm -f $(App_Name) $(Enclave_Name) $(Signed_Enclave_Name) $(App_Cpp_Objects) App/Enclave_u.* $(Enclave_Cpp_Objects) Enclave/Enclave_t.* $(NBENCHDIR)*.o $(NBENCHDIR)*~ Enclave/*.o 
+ 
++	@rm -f .config_* $(App_Name) $(Enclave_Name) $(Signed_Enclave_Name) $(App_Cpp_Objects) App/Enclave_u.* $(Enclave_Cpp_Objects) Enclave/Enclave_t.* monolith.o
++	@rm -rf tmp_obj
+Binary files template/sgx-nbench/nbenchPortal/gmon.out and template2/sgx-nbench/nbenchPortal/gmon.out differ
+diff -ruN template/sgx-nbench/nbenchPortal/nbench0.c template2/sgx-nbench/nbenchPortal/nbench0.c
+--- template/sgx-nbench/nbenchPortal/nbench0.c	2021-10-12 00:08:00.453279224 +0200
++++ template2/sgx-nbench/nbenchPortal/nbench0.c	2021-10-04 14:07:32.000000000 +0200
+@@ -64,300 +64,304 @@
+ int mainn(int argc, char *argv[])
+ #endif
+ {
+-int i;                  /* Index */
+-time_t time_and_date;   /* Self-explanatory */
+-struct tm *loctime;
+-double bmean;           /* Benchmark mean */
+-double bstdev;          /* Benchmark stdev */
+-double lx_memindex;     /* Linux memory index (mainly integer operations)*/
+-double lx_intindex;     /* Linux integer index */
+-double lx_fpindex;      /* Linux floating-point index */
+-double intindex;        /* Integer index */
+-double fpindex;         /* Floating-point index */
+-ulong bnumrun;          /* # of runs */
+-
+-#ifdef MAC
+-        MaxApplZone();
+-#endif
++        int i;                  /* Index */
++        time_t time_and_date;   /* Self-explanatory */
++        struct tm *loctime;
++        double bmean;           /* Benchmark mean */
++        double bstdev;          /* Benchmark stdev */
++        double lx_memindex;     /* Linux memory index (mainly integer operations)*/
++        double lx_intindex;     /* Linux integer index */
++        double lx_fpindex;      /* Linux floating-point index */
++        double intindex;        /* Integer index */
++        double fpindex;         /* Floating-point index */
++        ulong bnumrun;          /* # of runs */
++
++        #ifdef MAC
++                MaxApplZone();
++        #endif
++
++        #ifdef MACTIMEMGR
++        /* Set up high res timer */
++        MacHSTdelay=600*1000*1000;      /* Delay is 10 minutes */
++
++        memset((char *)&myTMTask,0,sizeof(TMTask));
++
++        /* Prime and remove the task, calculating overhead */
++        PrimeTime((QElemPtr)&myTMTask,-MacHSTdelay);
++        RmvTime((QElemPtr)&myTMTask);
++        MacHSTohead=MacHSTdelay+myTMTask.tmCount;
++        #endif
++
++        #ifdef WIN31TIMER
++        /* Set up the size of the timer info structure */
++        win31tinfo.dwSize=(DWORD)sizeof(TIMERINFO);
++        /* Load library */
++        if((hThlp=LoadLibrary("TOOLHELP.DLL"))<32)
++        {       printf("Error loading TOOLHELP\n");
++                exit(0);
++        }
++        if(!(lpfn=GetProcAddress(hThlp,"TimerCount")))
++        {       printf("TOOLHELP error\n");
++                exit(0);
++        }
++        #endif
+ 
+-#ifdef MACTIMEMGR
+-/* Set up high res timer */
+-MacHSTdelay=600*1000*1000;      /* Delay is 10 minutes */
+-
+-memset((char *)&myTMTask,0,sizeof(TMTask));
+-
+-/* Prime and remove the task, calculating overhead */
+-PrimeTime((QElemPtr)&myTMTask,-MacHSTdelay);
+-RmvTime((QElemPtr)&myTMTask);
+-MacHSTohead=MacHSTdelay+myTMTask.tmCount;
+-#endif
++        /*
++        ** Set global parameters to default.
++        */
++        global_min_ticks=MINIMUM_TICKS;
++        global_min_seconds=MINIMUM_SECONDS;
++        global_allstats=0;
++        global_custrun=0;
++        global_align=8;
++        write_to_file=0;
++        lx_memindex=(double)1.0;        /* set for geometric mean computations */
++        lx_intindex=(double)1.0;
++        lx_fpindex=(double)1.0;
++        intindex=(double)1.0;
++        fpindex=(double)1.0;
++        mem_array_ents=0;               /* Nothing in mem array */
+ 
+-#ifdef WIN31TIMER
+-/* Set up the size of the timer info structure */
+-win31tinfo.dwSize=(DWORD)sizeof(TIMERINFO);
+-/* Load library */
+-if((hThlp=LoadLibrary("TOOLHELP.DLL"))<32)
+-{       printf("Error loading TOOLHELP\n");
+-        exit(0);
+-}
+-if(!(lpfn=GetProcAddress(hThlp,"TimerCount")))
+-{       printf("TOOLHELP error\n");
+-        exit(0);
+-}
+-#endif
++        /*
++        ** We presume all tests will be run unless told
++        ** otherwise
++        */
+ 
+-/*
+-** Set global parameters to default.
+-*/
+-global_min_ticks=MINIMUM_TICKS;
+-global_min_seconds=MINIMUM_SECONDS;
+-global_allstats=0;
+-global_custrun=0;
+-global_align=8;
+-write_to_file=0;
+-lx_memindex=(double)1.0;        /* set for geometric mean computations */
+-lx_intindex=(double)1.0;
+-lx_fpindex=(double)1.0;
+-intindex=(double)1.0;
+-fpindex=(double)1.0;
+-mem_array_ents=0;               /* Nothing in mem array */
++        //NUMTESTS=10
++        //tests_to_do = INTEGER ARRAY FILLED WITH 1
++        int passed_num = 0;
++
++        if(argc <= 1 || atoi(argv[1]) <= 0 || atoi(argv[1]) > 10){
++        for(i=0;i<NUMTESTS;i++)
++                tests_to_do[i]=1;
++                
++        }else{
++        tests_to_do[atoi(argv[1])-1]=1;
++        passed_num = 1;
++        }
+ 
+-/*
+-** We presume all tests will be run unless told
+-** otherwise
+-*/
++        /*
++        ** Initialize test data structures to default
++        ** values.
++        */
++        set_request_secs();     /* Set all request_secs fields */
++        global_numsortstruct.adjust=0;
++        global_numsortstruct.arraysize=NUMARRAYSIZE;
+ 
+-//NUMTESTS=10
+-//tests_to_do = INTEGER ARRAY FILLED WITH 1
+-int passed_num = 0;
+-
+-if(argc <= 1 || atoi(argv[1]) <= 0 || atoi(argv[1]) > 10){
+-    for(i=0;i<NUMTESTS;i++)
+-	tests_to_do[i]=1;
+-	
+-}else{
+-    tests_to_do[atoi(argv[1])-1]=1;
+-    passed_num = 1;
+-}
++        global_strsortstruct.adjust=0;
++        global_strsortstruct.arraysize=STRINGARRAYSIZE;
+ 
+-/*
+-** Initialize test data structures to default
+-** values.
+-*/
+-set_request_secs();     /* Set all request_secs fields */
+-global_numsortstruct.adjust=0;
+-global_numsortstruct.arraysize=NUMARRAYSIZE;
++        global_bitopstruct.adjust=0;
++        global_bitopstruct.bitfieldarraysize=BITFARRAYSIZE;
+ 
+-global_strsortstruct.adjust=0;
+-global_strsortstruct.arraysize=STRINGARRAYSIZE;
++        global_emfloatstruct.adjust=0;
++        global_emfloatstruct.arraysize=EMFARRAYSIZE;
+ 
+-global_bitopstruct.adjust=0;
+-global_bitopstruct.bitfieldarraysize=BITFARRAYSIZE;
++        global_fourierstruct.adjust=0;
+ 
+-global_emfloatstruct.adjust=0;
+-global_emfloatstruct.arraysize=EMFARRAYSIZE;
++        global_assignstruct.adjust=0;
+ 
+-global_fourierstruct.adjust=0;
++        global_ideastruct.adjust=0;
++        global_ideastruct.arraysize=IDEAARRAYSIZE;
+ 
+-global_assignstruct.adjust=0;
++        global_huffstruct.adjust=0;
++        global_huffstruct.arraysize=HUFFARRAYSIZE;
+ 
+-global_ideastruct.adjust=0;
+-global_ideastruct.arraysize=IDEAARRAYSIZE;
++        global_nnetstruct.adjust=0;
+ 
+-global_huffstruct.adjust=0;
+-global_huffstruct.arraysize=HUFFARRAYSIZE;
++        global_lustruct.adjust=0;
+ 
+-global_nnetstruct.adjust=0;
++        /*
++        ** For Macintosh -- read the command line.
++        */
++        #ifdef MAC
++        UCommandLine();
++        #endif
+ 
+-global_lustruct.adjust=0;
++        /*
++        ** Handle any command-line arguments.
++        */
++        if(argc>1)
++                for(i=1+passed_num;i<argc;i++)
++                        if(parse_arg(argv[i])==-1)
++                        {       display_help(argv[0]);
++                                exit(0);
++                        }
+ 
+-/*
+-** For Macintosh -- read the command line.
+-*/
+-#ifdef MAC
+-UCommandLine();
+-#endif
++        /*
++        ** Output header
++        */
+ 
+-/*
+-** Handle any command-line arguments.
+-*/
+-if(argc>1)
+-        for(i=1+passed_num;i<argc;i++)
+-                if(parse_arg(argv[i])==-1)
+-                {       display_help(argv[0]);
+-                        exit(0);
+-                }
++        //EXECUTES
++        #ifdef LINUX
++        //output_string("\nBYTEmark* Native Mode Benchmark ver. 2 (10/95)\n");
++        //output_string("Index-split by Andrew D. Balsa (11/97)\n");
++        //output_string("Linux/Unix* port by Uwe F. Mayer (12/96,11/97)\n");
++        output_string("====================Modified version of nbench for Intel SGX==========================");
++        #else
++        //DOES NOT EXECUTE
++        output_string("BBBBBB   YYY   Y  TTTTTTT  EEEEEEE\n");
++        output_string("BBB   B  YYY   Y    TTT    EEE\n");
++        output_string("BBB   B  YYY   Y    TTT    EEE\n");
++        output_string("BBBBBB    YYY Y     TTT    EEEEEEE\n");
++        output_string("BBB   B    YYY      TTT    EEE\n");
++        output_string("BBB   B    YYY      TTT    EEE\n");
++        output_string("BBBBBB     YYY      TTT    EEEEEEE\n\n");
++        output_string("\nBYTEmark (tm) Native Mode Benchmark ver. 2 (10/95)\n");
++        #endif
++        /*
++        ** See if the user wants all stats.  Output heading info
++        ** if so.
++        */
+ 
+-/*
+-** Output header
+-*/
++        //DO NOT EXECUTE
++        if(global_allstats)
++        {
++                        output_string("\n");
++                        output_string("============================== ALL STATISTICS ===============================\n");
++                time(&time_and_date);
++                loctime=localtime(&time_and_date);
++                sprintf(buffer,"**Date and time of benchmark run: %s",asctime(loctime));
++                output_string(buffer);
++                sprintf(buffer,"**Sizeof: char:%u short:%u int:%u long:%u u8:%u u16:%u u32:%u int32:%u\n",
++                        (unsigned int)sizeof(char),
++                        (unsigned int)sizeof(short),
++                        (unsigned int)sizeof(int),
++                        (unsigned int)sizeof(long),
++                        (unsigned int)sizeof(u8),
++                        (unsigned int)sizeof(u16),
++                        (unsigned int)sizeof(u32),
++                        (unsigned int)sizeof(int32));
++                output_string(buffer);
++        #ifdef LINUX
++        #include "sysinfo.c"
++        #else
++                sprintf(buffer,"**%s\n",sysname);
++                output_string(buffer);
++                sprintf(buffer,"**%s\n",compilername);
++                output_string(buffer);
++                sprintf(buffer,"**%s\n",compilerversion);
++                output_string(buffer);
++        #endif
++                        output_string("=============================================================================\n");
++        }
+ 
+-//EXECUTES
+-#ifdef LINUX
+-//output_string("\nBYTEmark* Native Mode Benchmark ver. 2 (10/95)\n");
+-//output_string("Index-split by Andrew D. Balsa (11/97)\n");
+-//output_string("Linux/Unix* port by Uwe F. Mayer (12/96,11/97)\n");
+-output_string("====================Modified version of nbench for Intel SGX====================");
+-#else
+-//DOES NOT EXECUTE
+-output_string("BBBBBB   YYY   Y  TTTTTTT  EEEEEEE\n");
+-output_string("BBB   B  YYY   Y    TTT    EEE\n");
+-output_string("BBB   B  YYY   Y    TTT    EEE\n");
+-output_string("BBBBBB    YYY Y     TTT    EEEEEEE\n");
+-output_string("BBB   B    YYY      TTT    EEE\n");
+-output_string("BBB   B    YYY      TTT    EEE\n");
+-output_string("BBBBBB     YYY      TTT    EEEEEEE\n\n");
+-output_string("\nBYTEmark (tm) Native Mode Benchmark ver. 2 (10/95)\n");
+-#endif
+-/*
+-** See if the user wants all stats.  Output heading info
+-** if so.
+-*/
+ 
+-//DO NOT EXECUTE
+-if(global_allstats)
+-{
+-                output_string("\n");
+-                output_string("============================== ALL STATISTICS ===============================\n");
+-        time(&time_and_date);
+-        loctime=localtime(&time_and_date);
+-        sprintf(buffer,"**Date and time of benchmark run: %s",asctime(loctime));
+-        output_string(buffer);
+-        sprintf(buffer,"**Sizeof: char:%u short:%u int:%u long:%u u8:%u u16:%u u32:%u int32:%u\n",
+-                (unsigned int)sizeof(char),
+-                (unsigned int)sizeof(short),
+-                (unsigned int)sizeof(int),
+-                (unsigned int)sizeof(long),
+-                (unsigned int)sizeof(u8),
+-                (unsigned int)sizeof(u16),
+-                (unsigned int)sizeof(u32),
+-                (unsigned int)sizeof(int32));
+-        output_string(buffer);
+-#ifdef LINUX
+-#include "sysinfo.c"
+-#else
+-        sprintf(buffer,"**%s\n",sysname);
+-        output_string(buffer);
+-        sprintf(buffer,"**%s\n",compilername);
+-        output_string(buffer);
+-        sprintf(buffer,"**%s\n",compilerversion);
+-        output_string(buffer);
+-#endif
+-                output_string("=============================================================================\n");
+-}
++        //EXECUTES
++        /*
++        ** Execute the tests.
++        */
++        #ifdef LINUX
++        output_string("\n");
++        output_string("TEST                : mean iter/sec.   : stdev            : stderr           : nruns :\n");
++        output_string("--------------------:------------------:------------------:------------------:-------:\n");
++        #endif
+ 
++        //NUMTESTS=10
++        for(i=0;i<NUMTESTS;i++)
++        {
++                //EVALUATES TRUE 10 TIMES
++                if(tests_to_do[i])
++                {       sprintf(buffer,"%s    :",ftestnames[i]);
++                                        output_string(buffer);
++                        //output_string("EXECUTES HERE");
++                                //DOES NOT EXECUTE                
++                                if (0!=bench_with_confidence(i,
++                                &bmean,
++                                &bstdev,
++                                &bnumrun)){
++                        output_string("\n** WARNING: The current test result is NOT 99 % statistically certain.\n");
++                        output_string("** WARNING: The variation among the individual results is too large.\n");
++                        output_string("                    :");
++                        }
+ 
+-//EXECUTES
+-/*
+-** Execute the tests.
+-*/
+-#ifdef LINUX
+-output_string("\nTEST                : Iterations/sec.  : Old Index   : New Index\n");
+-output_string("                    :                  : Pentium 90* : AMD K6/233*\n");
+-output_string("--------------------:------------------:-------------:------------\n");
+-#endif
++                        sprintf(buffer," %15.5f  : %15.5f  : %15.5f  :  %3.lu  : \n", bmean, bstdev, bstdev/sqrt((double)bnumrun), bnumrun);
++        /*                
++        #ifdef LINUX
++                        sprintf(buffer," %15.5g  :  %9.2f  :  %9.2f\n",
++                                bmean,bmean/bindex[i],bmean/lx_bindex[i]);
++        #else
++                        sprintf(buffer,"  Iterations/sec.: %13.2f  Index: %6.2f\n",
++                                bmean,bmean/bindex[i]);
++        #endif
++        */
++                        output_string(buffer);
++                        /*
++                        ** Gather integer or FP indexes
++                        */
++                        if((i==4)||(i==8)||(i==9)){
++                        /* FP index */
++                        fpindex=fpindex*(bmean/bindex[i]);
++                        /* Linux FP index */
++                        lx_fpindex=lx_fpindex*(bmean/lx_bindex[i]);
++                        }
++                        else{
++                        /* Integer index */
++                        intindex=intindex*(bmean/bindex[i]);
++                        if((i==0)||(i==3)||(i==6)||(i==7))
++                        /* Linux integer index */
++                        lx_intindex=lx_intindex*(bmean/lx_bindex[i]);
++                        else
++                        /* Linux memory index */
++                        lx_memindex=lx_memindex*(bmean/lx_bindex[i]);
++                        }
+ 
+-//NUMTESTS=10
+-for(i=0;i<NUMTESTS;i++)
+-{
+-	//EVALUATES TRUE 10 TIMES
+-        if(tests_to_do[i])
+-        {       sprintf(buffer,"%s    :",ftestnames[i]);
++                        if(global_allstats)
++                        {
++                                sprintf(buffer,"  Absolute standard deviation: %g\n",bstdev);
+                                 output_string(buffer);
+-		//output_string("EXECUTES HERE");
+-			//DOES NOT EXECUTE                
+-			if (0!=bench_with_confidence(i,
+-                        &bmean,
+-                        &bstdev,
+-                        &bnumrun)){
+-		  output_string("\n** WARNING: The current test result is NOT 99 % statistically certain.\n");
+-		  output_string("** WARNING: The variation among the individual results is too large.\n");
+-		  output_string("                    :");
+-		}
+-#ifdef LINUX
+-                sprintf(buffer," %15.5g  :  %9.2f  :  %9.2f\n",
+-                        bmean,bmean/bindex[i],bmean/lx_bindex[i]);
+-#else
+-		sprintf(buffer,"  Iterations/sec.: %13.2f  Index: %6.2f\n",
+-                        bmean,bmean/bindex[i]);
+-#endif
+-                output_string(buffer);
+-		/*
+-		** Gather integer or FP indexes
+-		*/
+-		if((i==4)||(i==8)||(i==9)){
+-		  /* FP index */
+-		  fpindex=fpindex*(bmean/bindex[i]);
+-		  /* Linux FP index */
+-		  lx_fpindex=lx_fpindex*(bmean/lx_bindex[i]);
+-		}
+-		else{
+-		  /* Integer index */
+-		  intindex=intindex*(bmean/bindex[i]);
+-		  if((i==0)||(i==3)||(i==6)||(i==7))
+-		    /* Linux integer index */
+-		    lx_intindex=lx_intindex*(bmean/lx_bindex[i]);
+-		  else
+-		    /* Linux memory index */
+-		    lx_memindex=lx_memindex*(bmean/lx_bindex[i]);
+-		}
+-
+-                if(global_allstats)
+-                {
+-                        sprintf(buffer,"  Absolute standard deviation: %g\n",bstdev);
+-                        output_string(buffer);
+-			if (bmean>(double)1e-100){
+-			  /* avoid division by zero */
+-			  sprintf(buffer,"  Relative standard deviation: %g %%\n",
+-				  (double)100*bstdev/bmean);
+-			  output_string(buffer);
+-			}
+-                        sprintf(buffer,"  Number of runs: %lu\n",bnumrun);
+-                        output_string(buffer);
+-                        show_stats(i);
+-                        sprintf(buffer,"Done with %s\n\n",ftestnames[i]);
+-                        output_string(buffer);
++                                if (bmean>(double)1e-100){
++                                /* avoid division by zero */
++                                sprintf(buffer,"  Relative standard deviation: %g %%\n",
++                                        (double)100*bstdev/bmean);
++                                output_string(buffer);
++                                }
++                                sprintf(buffer,"  Number of runs: %lu\n",bnumrun);
++                                output_string(buffer);
++                                show_stats(i);
++                                sprintf(buffer,"Done with %s\n\n",ftestnames[i]);
++                                output_string(buffer);
++                        }
+                 }
+-        }
+-}//END FOR LOOP
++        }//END FOR LOOP
+ 
+-output_string("=================================TEST COMPLETED=================================\n");
++        output_string("=================================TEST COMPLETED=======================================\n");
+ 
+-/* printf("...done...\n"); */
++        /* printf("...done...\n"); */
+ 
+-/*
+-** Output the total indexes
+-*/
+-/*
+-if(global_custrun==0)
+-{
+-        output_string("==========================ORIGINAL BYTEMARK RESULTS==========================\n");
+-        sprintf(buffer,"INTEGER INDEX       : %.3f\n",
+-                       pow(intindex,(double).142857));
+-        output_string(buffer);
+-        sprintf(buffer,"FLOATING-POINT INDEX: %.3f\n",
+-                        pow(fpindex,(double).33333));
+-        output_string(buffer);
+-        output_string("Baseline (MSDOS*)   : Pentium* 90, 256 KB L2-cache, Watcom* compiler 10.0\n");
+-#ifdef LINUX
+-        output_string("==============================LINUX DATA BELOW===============================\n");
+-	hardware(write_to_file, global_ofile);
+-#include "sysinfoc.c"
+-        sprintf(buffer,"MEMORY INDEX        : %.3f\n",
+-                       pow(lx_memindex,(double).3333333333));
+-        output_string(buffer);
+-        sprintf(buffer,"INTEGER INDEX       : %.3f\n",
+-                       pow(lx_intindex,(double).25));
+-        output_string(buffer);
+-        sprintf(buffer,"FLOATING-POINT INDEX: %.3f\n",
+-                        pow(lx_fpindex,(double).3333333333));
+-        output_string(buffer);
+-        output_string("Baseline (LINUX)    : AMD K6/233*, 512 KB L2-cache, gcc 2.7.2.3, libc-5.4.38\n");
+-#endif
+-output_string("* Trademarks are property of their respective holder.\n");
+-}
+-*/
+-exit(0);
++        /*
++        ** Output the total indexes
++        */
++        /*
++        if(global_custrun==0)
++        {
++                output_string("==========================ORIGINAL BYTEMARK RESULTS==========================\n");
++                sprintf(buffer,"INTEGER INDEX       : %.3f\n",
++                        pow(intindex,(double).142857));
++                output_string(buffer);
++                sprintf(buffer,"FLOATING-POINT INDEX: %.3f\n",
++                                pow(fpindex,(double).33333));
++                output_string(buffer);
++                output_string("Baseline (MSDOS*)   : Pentium* 90, 256 KB L2-cache, Watcom* compiler 10.0\n");
++        #ifdef LINUX
++                output_string("==============================LINUX DATA BELOW===============================\n");
++                hardware(write_to_file, global_ofile);
++        #include "sysinfoc.c"
++                sprintf(buffer,"MEMORY INDEX        : %.3f\n",
++                        pow(lx_memindex,(double).3333333333));
++                output_string(buffer);
++                sprintf(buffer,"INTEGER INDEX       : %.3f\n",
++                        pow(lx_intindex,(double).25));
++                output_string(buffer);
++                sprintf(buffer,"FLOATING-POINT INDEX: %.3f\n",
++                                pow(lx_fpindex,(double).3333333333));
++                output_string(buffer);
++                output_string("Baseline (LINUX)    : AMD K6/233*, 512 KB L2-cache, gcc 2.7.2.3, libc-5.4.38\n");
++        #endif
++        output_string("* Trademarks are property of their respective holder.\n");
++        }
++        */
++        exit(0);
+ }
+ //END OF MAIN
+ 
+@@ -788,81 +792,95 @@
+         double *stdev,                  /* Standard deviation */
+         ulong *numtries)                /* # of attempts */
+ {
+-double myscores[30];            /* Need at least 5 scores, use at most 30 */
+-double c_half_interval;         /* Confidence half interval */
+-int i;                          /* Index */
+-/* double newscore; */          /* For improving confidence interval */
++        #define N_RUNS 50
+ 
+-/*
+-** Get first 5 scores.  Then begin confidence testing.
+-*/
+-for (i=0;i<5;i++)
+-{       (*funcpointer[fid])();
+-        myscores[i]=getscore(fid);
+-#ifdef DEBUG
+-	printf("score # %d = %g\n", i, myscores[i]);
+-#endif
+-}
+-*numtries=5;            /* Show 5 attempts */
++        double myscores[N_RUNS+1];            /* Need at least 5 scores, use at most 30 */
++        double c_half_interval;         /* Confidence half interval */
++        int i;                          /* Index */
++        /* double newscore; */          /* For improving confidence interval */
++
++
++        for (i=0;i<N_RUNS;++i) {
++                (*funcpointer[fid])();
++                myscores[i]=getscore(fid);
++                //printf("score: %f\n", myscores[i]);
++        }
++        *numtries = N_RUNS;
++
++        return calc_confidence(myscores, *numtries, &c_half_interval, mean, stdev);
+ 
+-/*
+-** The system allows a maximum of 30 tries before it gives
+-** up.  Since we've done 5 already, we'll allow 25 more.
+-*/
+ 
+-/*
+-** Enter loop to test for confidence criteria.
+-*/
+-while(1)
+-{
+         /*
+-        ** Calculate confidence. Should always return 0.
++        ** Get first 5 scores.  Then begin confidence testing.
+         */
+-        if (0!=calc_confidence(myscores,
+-		*numtries,
+-                &c_half_interval,
+-                mean,
+-                stdev)) return(-1);
++        for (i=0;i<5;i++)
++        {       
++                (*funcpointer[fid])();
++                myscores[i]=getscore(fid);
++        #ifdef DEBUG
++                printf("score # %d = %g\n", i, myscores[i]);
++        #endif
++        }
++        *numtries=5;            /* Show 5 attempts */
+ 
+         /*
+-        ** Is the length of the half interval 5% or less of mean?
+-        ** If so, we can go home.  Otherwise, we have to continue.
++        ** The system allows a maximum of 30 tries before it gives
++        ** up.  Since we've done 5 already, we'll allow 25 more.
+         */
+-       if(c_half_interval/ (*mean) <= (double)0.01)
+-      //  if(c_half_interval/ (*mean) <= (double)0.05)
+-                break;
+ 
+-#ifdef OLDCODE
+-#undef OLDCODE
+-#endif
+-#ifdef OLDCODE
+-/* this code is no longer valid, we now do not replace but add new scores */
+-/* Uwe F. Mayer */
+-	      /*
+-	      ** Go get a new score and see if it
+-	      ** improves existing scores.
+-	      */
+-	      do {
+-		      if(*numtries==10)
+-			      return(-1);
+-		      (*funcpointer[fid])();
+-		      *numtries+=1;
+-		      newscore=getscore(fid);
+-	      } while(seek_confidence(myscores,&newscore,
+-		      &c_half_interval,mean,stdev)==0);
+-#endif
+-	/* We now simply add a new test run and hope that the runs
+-           finally stabilize, Uwe F. Mayer */
+-	if(*numtries==30) return(-1);
+-	(*funcpointer[fid])();
+-	myscores[*numtries]=getscore(fid);
+-#ifdef DEBUG
+-	printf("score # %ld = %g\n", *numtries, myscores[*numtries]);
+-#endif
+-	*numtries+=1;
+-}
++        /*
++        ** Enter loop to test for confidence criteria.
++        */
++        while(1)
++        {
++                /*
++                ** Calculate confidence. Should always return 0.
++                */
++                if (0!=calc_confidence(myscores,
++                        *numtries,
++                        &c_half_interval,
++                        mean,
++                        stdev)) return(-1);
+ 
+-return(0);
++                /*
++                ** Is the length of the half interval 5% or less of mean?
++                ** If so, we can go home.  Otherwise, we have to continue.
++                */
++        if(c_half_interval/ (*mean) <= (double)0.01)
++        //  if(c_half_interval/ (*mean) <= (double)0.05)
++                        break;
++
++        #ifdef OLDCODE
++        #undef OLDCODE
++        #endif
++        #ifdef OLDCODE
++        /* this code is no longer valid, we now do not replace but add new scores */
++        /* Uwe F. Mayer */
++                /*
++                ** Go get a new score and see if it
++                ** improves existing scores.
++                */
++                do {
++                        if(*numtries==10)
++                                return(-1);
++                        (*funcpointer[fid])();
++                        *numtries+=1;
++                        newscore=getscore(fid);
++                } while(seek_confidence(myscores,&newscore,
++                        &c_half_interval,mean,stdev)==0);
++        #endif
++                /* We now simply add a new test run and hope that the runs
++                finally stabilize, Uwe F. Mayer */
++                if(*numtries==30) return(-1);
++                (*funcpointer[fid])();
++                myscores[*numtries]=getscore(fid);
++        #ifdef DEBUG
++                printf("score # %ld = %g\n", *numtries, myscores[*numtries]);
++        #endif
++                *numtries+=1;
++        }
++
++        return(0);
+ }
+ 
+ #ifdef OLDCODE
+@@ -940,17 +958,18 @@
+ /* Here is a list of the student-t distribution up to 29 degrees of
+    freedom. The value at 0 is bogus, as there is no value for zero
+    degrees of freedom. */
+-double student_t[30]={0.0 , 12.706 , 4.303 , 3.182 , 2.776 , 2.571 ,
++/*double student_t[30]={0.0 , 12.706 , 4.303 , 3.182 , 2.776 , 2.571 ,
+                              2.447 , 2.365 , 2.306 , 2.262 , 2.228 ,
+                              2.201 , 2.179 , 2.160 , 2.145 , 2.131 ,
+                              2.120 , 2.110 , 2.101 , 2.093 , 2.086 ,
+                              2.080 , 2.074 , 2.069 , 2.064 , 2.060 ,
+ 		             2.056 , 2.052 , 2.048 , 2.045 };
++                             */
+ int i;          /* Index */
+-if ((num_scores<2) || (num_scores>30)) {
++/*if ((num_scores<2) || (num_scores>30)) {
+   output_string("Internal error: calc_confidence called with an illegal number of scores\n");
+   return(-1);
+-}
++}*/
+ /*
+ ** First calculate mean.
+ */
+@@ -974,7 +993,7 @@
+ ** with num_scores-1 degrees of freedom, and dividing by sqrt(number of
+ ** observations). See any introduction to statistics.
+ */
+-*c_half_interval=student_t[num_scores-1] * (*sdev) / sqrt((double)num_scores);
++*c_half_interval=0.0;//student_t[num_scores-1] * (*sdev) / sqrt((double)num_scores);
+ return(0);
+ }
+ 
+@@ -1028,8 +1047,10 @@
+ {
+ 
+ printf("%s",buffer);
++fflush(stdout);
+ if(write_to_file!=0)
+         fprintf(global_ofile,"%s",buffer);
++        fflush(global_ofile);
+ return;
+ }
+ 

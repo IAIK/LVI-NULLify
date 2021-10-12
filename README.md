@@ -46,8 +46,6 @@ Please install all prerequisites for your system according to https://github.com
 
 This step creates an unpatched SDK that is necessary for PSW installation.
 
-Otherwise, from within the `scripts` folder:
-
 ### Automatic:
 If you want to install this to the default location, /opt/intel (recommended), you can run `./install_unmodified_sdk.sh`.
 ### Manual:
@@ -80,7 +78,10 @@ As the last step, build install the patched SDK from `linux-sgx`, following the 
 You may want to install this to a different folder (i.e. not /opt/intel), for compatibilty with the PoCs we recommend `SDKs/clang-gs` (in this directory).
 
 # 5 PoC Enclaves
-We provide LVI-Null PoCs inside the `POC` folder, see the readme in there.
+We provide LVI-Null PoCs inside the `POC` folder, see the [Readme](POC/README.md) in there.
+
+# 6 Benchmarks
+Scripts to install and run sgxbench and sgx-nbench are provided in `benchmarks`, continue in the [Readme](benchmarks/README.md) there.
 
 # Warnings
 **Warning #1**: We are providing this code as-is. You are responsible for protecting yourself, your property and data, and others from any risks caused by this code. This code may cause unexpected and undesirable behavior to occur on your machine.

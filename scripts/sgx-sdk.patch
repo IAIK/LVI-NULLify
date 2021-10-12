@@ -217,27 +217,6 @@ index 4ada7c0b..040932dd 100644
 -    ret
 -
 +    GS_REL_RET
-diff --git a/external/dcap_source b/external/dcap_source
-index 4605fae1..96ea09b7 160000
---- a/external/dcap_source
-+++ b/external/dcap_source
-@@ -1 +1 @@
--Subproject commit 4605fae1c606de4ff1191719433f77f050f1c33c
-+Subproject commit 96ea09b72c52852be166ce21e435562e74f9966d
-diff --git a/external/dnnl/dnnl b/external/dnnl/dnnl
-index e1fe0eb8..52c3052d 160000
---- a/external/dnnl/dnnl
-+++ b/external/dnnl/dnnl
-@@ -1 +1 @@
--Subproject commit e1fe0eb8119645778ea31bcd42b790b61f6b4577
-+Subproject commit 52c3052df8ec1d5b8b45cb6c350a952840eabd42
-diff --git a/external/ippcp_internal/ipp-crypto b/external/ippcp_internal/ipp-crypto
-new file mode 160000
-index 00000000..415960b5
---- /dev/null
-+++ b/external/ippcp_internal/ipp-crypto
-@@ -0,0 +1 @@
-+Subproject commit 415960b5844594d4e763ca4c246baaf399e342e2
 diff --git a/make_psw_debug.sh b/make_psw_debug.sh
 new file mode 100755
 index 00000000..e95b0ad2

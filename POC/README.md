@@ -1,13 +1,15 @@
 # General
 
 ## Setup
-POCs require the PTEditor module to be loaded, available at https://github.com/misc0110/PTEditor/
+POCs require the PTEditor module to be loaded, available at https://github.com/misc0110/PTEditor/  
+You can follow the instructions in the readme there to install from PPA or source.
+Loading unsigned kernel modules may not work with secure boot enabled, thus you will also need to disable it, or self-sign the module.
 
 If you installed you SDK and LVINullify SDK anywhere other than the recommended paths, you will have to adjust the corresponding lines in the Makefiles of the POCs.
 
 If you want to see anything (interesting) at all, you need a CPU that supports SGX and is vulnerable to LVI Null (https://software.intel.com/content/www/us/en/develop/topics/software-security-guidance/processors-affected-consolidated-product-cpu-model.html).
 
-For best results, run the POCs on a quiet system or isolated cores and fix the CPU frequency (e.g. cpupower -c all frequency-set). 
+For best results, run the POCs on a quiet system or isolated cores (start pocs with taskset on those cores) and fix the CPU frequency (e.g. cpupower -c all frequency-set). 
 
 ## Building
 

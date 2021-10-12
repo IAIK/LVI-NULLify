@@ -1,0 +1,4 @@
+#!/bin/bash
+DIR=`dirname "$0"`
+
+$DIR/llvm11/build/bin/clang++ -mlvi-hardening -mllvm -x86-lvi-load-opt-plugin=$DIR/lvi-llvm-optimization-plugin/build/OptimizeCut.so -mllvm -x86-experimental-lvi-inline-asm-hardening $@  

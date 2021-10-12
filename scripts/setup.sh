@@ -16,7 +16,7 @@ $script_directory/install_unmodified_sdk.sh
 
 echo "DONE installing unmodified sdk"
 
-#clean up
+#install modified PSW
 $script_directory/install_patched_psw.sh
 echo "DONE installing patched psw"
 

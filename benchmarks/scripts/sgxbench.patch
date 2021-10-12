@@ -1,0 +1,188 @@
+diff -ruN template/sgxbench/Enclave/Enclave.c template2/sgxbench/Enclave/Enclave.c
+--- template/sgxbench/Enclave/Enclave.c	2018-08-07 10:57:34.000000000 +0200
++++ template2/sgxbench/Enclave/Enclave.c	2021-10-04 14:07:32.000000000 +0200
+@@ -10,17 +10,20 @@
+ static unsigned long long int_enc_buffer[ENCLAVE_INT_ENC_BUFFER_COUNT] = {0};
+ 
+ inline __attribute__((always_inline)) void clflush_range(volatile void *p, size_t size) {
++    __builtin___clear_cache(p, (volatile char*)p + size);
++    /*
+     for (size_t i = 0; i < size; i += 64) {
+-        volatile void *pi = p + i;
+-        asm volatile ("clflush (%0)" :: "r"(pi));
+-    }
++        volatile void *pi = (volatile char *)p + i;
++        
++        asm volatile ("clflush %%gs:(%0)" :: "r"(pi));
++    }*/
+     asm volatile ("mfence");
+ }
+ 
+ inline __attribute__((always_inline)) uint64_t clearcache(void *buf, size_t size) {
+     uint64_t sum;
+     size_t count = size / sizeof(uint64_t);
+-    volatile uint64_t *p = buf;
++    volatile uint64_t *p = (volatile uint64_t *)buf;
+     while (count--) {
+         sum += *p;
+         *p++ = 0;
+diff -ruN template/sgxbench/Enclave/Enclave_gs.config.xml template2/sgxbench/Enclave/Enclave_gs.config.xml
+--- template/sgxbench/Enclave/Enclave_gs.config.xml	1970-01-01 01:00:00.000000000 +0100
++++ template2/sgxbench/Enclave/Enclave_gs.config.xml	2021-10-04 14:07:32.000000000 +0200
+@@ -0,0 +1,12 @@
++<EnclaveConfiguration>
++	<ProdID>0xdead</ProdID>
++	<ISVSVN>0</ISVSVN>
++	<StackMaxSize>0x40000</StackMaxSize>
++	<HeapMaxSize>0x100000</HeapMaxSize>
++	<TCSNum>10</TCSNum>
++	<TCSPolicy>1</TCSPolicy>
++	<!-- Recommend changing 'DisableDebug' to 1 to make the enclave undebuggable for enclave release -->
++	<DisableDebug>0</DisableDebug>
++	<MiscSelect>0</MiscSelect>
++	<MiscMask>0xFFFFFFFF</MiscMask>
++	</EnclaveConfiguration>
+diff -ruN template/sgxbench/Enclave/Makefile.in template2/sgxbench/Enclave/Makefile.in
+--- template/sgxbench/Enclave/Makefile.in	2018-08-07 10:57:34.000000000 +0200
++++ template2/sgxbench/Enclave/Makefile.in	2021-10-04 14:07:32.000000000 +0200
+@@ -10,12 +10,16 @@
+ libdir=@libdir@
+ enclave_libdir=@enclave_libdir@
+ 
++SGX_MODE ?= HW
++SGX_ARCH ?= x64
++SGX_DEBUG ?= 1
++
+ ENCLAVE=Enclave
+ 
+ OBJS=$(ENCLAVE).o
+ 
+ %.o: %.c
+-	$(CC) $(CPPFLAGS) $(ENCLAVE_CPPFLAGS) $(CFLAGS) $(ENCLAVE_CFLAGS) -c $<
++	$(TR_CC) $(CPPFLAGS) $(ENCLAVE_CPPFLAGS) $(CFLAGS) $(ENCLAVE_CFLAGS) -c $< -o $@
+ 
+ all: $(ENCLAVE).so
+ 
+diff -ruN template/sgxbench/main.c template2/sgxbench/main.c
+--- template/sgxbench/main.c	2018-08-07 10:57:34.000000000 +0200
++++ template2/sgxbench/main.c	2021-10-04 14:07:32.000000000 +0200
+@@ -502,6 +502,9 @@
+             break;
+ 
+         case 204: // test enclave destroy, cold cache
++            warmupsize = 25;
++            batchsize = 1025;
++
+             ret |= sgx_destroy_enclave(eid);
+             for (int i = 0; i < batchsize; i++) {
+                 clearcache(defeat, CACHE_DEFEAT_COUNT);
+@@ -560,7 +563,7 @@
+     }
+ 
+     char outname[260];
+-    snprintf(outname, 250, "bench%d_%lu", select, (unsigned long)time(NULL));
++    snprintf(outname, 250, "results/bench%d", select);
+ 
+     FILE *output = fopen(outname, "w");
+     for (int i = warmupsize; i < batchsize; i++) {
+diff -ruN template/sgxbench/Makefile.in template2/sgxbench/Makefile.in
+--- template/sgxbench/Makefile.in	2018-08-07 10:57:34.000000000 +0200
++++ template2/sgxbench/Makefile.in	2021-10-04 14:07:32.000000000 +0200
+@@ -24,6 +24,7 @@
+ 	$(CC) -c $(CPPFLAGS) $(CFLAGS) -I$(SGXSDK_INCDIR) $<
+ 
+ all: $(EXECUTABLE) $(SGX_ENCLAVES)
++	-mkdir results
+ 
+ install: install-program install-enclaves
+ 
+diff -ruN template/sgxbench/postprocess.py template2/sgxbench/postprocess.py
+--- template/sgxbench/postprocess.py	1970-01-01 01:00:00.000000000 +0100
++++ template2/sgxbench/postprocess.py	2021-10-04 14:07:32.000000000 +0200
+@@ -0,0 +1,21 @@
++#!/usr/bin/env python3
++
++import numpy as np
++import sys
++import os
++
++data = []
++nrs=[2, 10, 26, 31, 32, 204]
++
++for nr in nrs:
++    print(f"reading: bench{nr}")
++    s = np.loadtxt(f"./results/bench{nr}")
++    data.append(np.mean(s))
++    data.append(np.std(s))
++    data.append(len(s))
++
++
++data = np.array(data)
++data = data[np.newaxis,:]
++
++np.savetxt("./results/results.csv", data,delimiter=";")
+diff -ruN template/sgxbench/sgx_enclave.mk.in template2/sgxbench/sgx_enclave.mk.in
+--- template/sgxbench/sgx_enclave.mk.in	2018-08-07 10:57:34.000000000 +0200
++++ template2/sgxbench/sgx_enclave.mk.in	2021-10-04 14:07:32.000000000 +0200
+@@ -7,18 +7,26 @@
+ SGX_EDGER8R=$(SGXSDK_BINDIR)/sgx_edger8r
+ SGX_SIGN=$(SGXSDK_BINDIR)/sgx_sign
+ 
+-ENCLAVE_CFLAGS=-nostdinc -fvisibility=hidden -fpie -fstack-protector
++ENCLAVE_CFLAGS=-nostdinc -fvisibility=hidden -fstack-protector
+ ENCLAVE_CPPFLAGS=-I$(SGXSDK_INCDIR) -I$(SGXSDK_INCDIR)/tlibc
+ ENCLAVE_CXXFLAGS=-nostdinc++ $(ENCLAVE_CFLAGS)
+ ENCLAVE_LDFLAGS=-Wl,--no-undefined -nostdlib -nodefaultlibs -nostartfiles \
+ 	-L$(SGXSDK_LIBDIR) \
+ 	-Wl,--whole-archive -l$(SGX_TRTS_LIB) -Wl,--no-whole-archive \
+-	-Wl,--start-group -lsgx_tstdc -lsgx_tstdcxx -lsgx_tcrypto -l$(SGX_TSERVICE_LIB) -Wl,--end-group \
++	-Wl,--start-group -lsgx_tstdc -lsgx_tcxx -lsgx_tcrypto -l$(SGX_TSERVICE_LIB) -Wl,--end-group \
+ 	-Wl,-Bstatic -Wl,-Bsymbolic -Wl,--no-undefined \
+ 	-Wl,-pie,-eenclave_entry -Wl,--export-dynamic \
+ 	-Wl,--defsym,__ImageBase=0
+ ENCLAVE_PKEY=$(ENCLAVE)_private.pem
+-ENCLAVE_CFG=$(ENCLAVE).config.xml
++
++ifneq ($(DR),)
++	ENCLAVE_CFG=$(ENCLAVE)_gs.config.xml
++else
++	ENCLAVE_CFG=$(ENCLAVE).config.xml
++	ENCLAVE_CFLAGS += -fpic
++	ENCLAVE_CPPFLAGS += -fpic
++endif
++
+ 
+ ENCLAVE_TOBJ= $(ENCLAVE)_t.o
+ ENCLAVE_CLEAN= $(ENCLAVE)_t.o $(ENCLAVE)_t.c $(ENCLAVE)_t.h $(ENCLAVE).so $(ENCLAVE).signed.so
+@@ -34,7 +42,7 @@
+ $(ENCLAVE_SIGNED): @ENCLAVE_SIGN_TARGET@
+ 
+ signed_enclave_dev: $(ENCLAVE_UNSIGNED) $(ENCLAVE_PKEY) $(ENCLAVE_CFG)
+-	$(SGX_SIGN) sign -key $(ENCLAVE_PKEY) -enclave $(ENCLAVE_UNSIGNED) -out $(ENCLAVE_SIGNED) -config $(ENCLAVE_CFG)
++	$(SGX_SIGN) sign -ignore-rel-error -key $(ENCLAVE_PKEY) -enclave $(ENCLAVE_UNSIGNED) -out $(ENCLAVE_SIGNED) -config $(ENCLAVE_CFG)
+ 
+ signed_enclave_rel:
+ 	@echo "--------------------------------------------------------------"
+@@ -49,22 +57,6 @@
+ 	@echo "--------------------------------------------------------------"
+ 
+ 
+-$(ENCLAVE_CFG):
+-	@echo "Creating default enclave configuration file:"
+-	@echo "$(ENCLAVE_CFG)"
+-	@echo "<EnclaveConfiguration>">$(ENCLAVE_CFG)
+-	@echo "	<ProdID>0</ProdID>">>$(ENCLAVE_CFG)
+-	@echo "	<ISVSVN>0</ISVSVN>">>$(ENCLAVE_CFG)
+-	@echo "	<StackMaxSize>0x40000</StackMaxSize>">>$(ENCLAVE_CFG)
+-	@echo "	<HeapMaxSize>0x100000</HeapMaxSize>">>$(ENCLAVE_CFG)
+-	@echo "	<TCSNum>10</TCSNum>">>$(ENCLAVE_CFG)
+-	@echo "	<TCSPolicy>1</TCSPolicy>">>$(ENCLAVE_CFG)
+-	@echo "	<!-- Recommend changing 'DisableDebug' to 1 to make the enclave undebuggable for enclave release -->">>$(ENCLAVE_CFG)
+-	@echo "	<DisableDebug>0</DisableDebug>">>$(ENCLAVE_CFG)
+-	@echo "	<MiscSelect>0</MiscSelect>">>$(ENCLAVE_CFG)
+-	@echo "	<MiscMask>0xFFFFFFFF</MiscMask>">>$(ENCLAVE_CFG)
+-	@echo "	</EnclaveConfiguration>">>$(ENCLAVE_CFG)
+-	@echo ""
+ 
+ $(ENCLAVE_PKEY):
+ 	@echo "Creating random private key file for testing and"

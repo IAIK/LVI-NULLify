@@ -1,0 +1,479 @@
+diff --git a/buildenv.mk b/buildenv.mk
+index 331611d7..02c9dbdb 100644
+--- a/buildenv.mk
++++ b/buildenv.mk
+@@ -67,6 +67,10 @@ NIPD := .nipd
+ NIPRODT := .niprod
+ CC ?= gcc
+ 
++#compiler for trusted sdk part
++TR_CC = $(ROOT_DIR)/../compiler/llvm/build/bin/clang
++TR_CXX = $(ROOT_DIR)/../compiler/llvm/build/bin/clang++
++
+ # clean the content of 'INCLUDE' - this variable will be set by vcvars32.bat
+ # thus it will cause build error when this variable is used by our Makefile,
+ # when compiling the code under Cygwin tainted by MSVC environment settings.
+@@ -113,10 +120,10 @@ COMMON_FLAGS += -ffunction-sections -fdata-sections
+ COMMON_FLAGS += -Wall -Wextra -Winit-self -Wpointer-arith -Wreturn-type \
+ 		-Waddress -Wsequence-point -Wformat-security \
+ 		-Wmissing-include-dirs -Wfloat-equal -Wundef -Wshadow \
+-		-Wcast-align -Wconversion -Wredundant-decls
++		-Wcast-align -Wconversion -Wredundant-decls -Wno-sign-conversion
+ 
+ # additional warnings flags for C
+-CFLAGS += -Wjump-misses-init -Wstrict-prototypes -Wunsuffixed-float-constants
++CFLAGS += -Wstrict-prototypes
+ 
+ # additional warnings flags for C++
+ CXXFLAGS += -Wnon-virtual-dtor
+@@ -196,6 +203,14 @@ else ifeq ($(MITIGATION-CVE-2020-0551), CF)
+     MITIGATION_LIB_PATH := cve_2020_0551_cf
+ endif
+ 
++# temp fix for sdk
++
++#ifeq ($(TR_CC), clang)
++MITIGATION_C = 0
++MITIGATION_ASM = 0
++#endif
++
++
+ ifneq ($(origin NIX_PATH), environment)
+ BINUTILS_DIR = /usr/local/bin
+ else
+diff --git a/common/inc/sgx_random_buffers.h b/common/inc/sgx_random_buffers.h
+index 1d54a385..36caa1be 100644
+--- a/common/inc/sgx_random_buffers.h
++++ b/common/inc/sgx_random_buffers.h
+@@ -90,7 +90,7 @@ R random_stack_advance(R(*f)(Ps...), Qs&&... args)
+     if (!EDMM_supported)
+         memset((void *)dummy_vla, 0, size);
+ #else
+-    (void)(dummy_vla);
++    asm volatile (""::"r"(dummy_vla):"memory");
+ #endif
+ 
+     return _random_stack_noinline_wrapper(f, std::forward<Qs>(args)...);
+@@ -275,7 +275,7 @@ private:
+         }
+     };
+ 
+-    char __bigger_[size()];
++    char __bigger_[size(1)];
+ };
+ 
+ template <class T, unsigned M = 0x1000>
+diff --git a/make_psw_debug.sh b/make_psw_debug.sh
+new file mode 100755
+index 00000000..24502ff4
+--- /dev/null
++++ b/make_psw_debug.sh
+@@ -0,0 +1,8 @@
++#!/bin/bash
++sudo /opt/intel/sgx-aesm-service/cleanup.sh
++sudo apt remove -y libsgx-launch libsgx-urts libsgx-epid libsgx-ae-le libsgx-ae-epid libsgx-ae-pce libsgx-aesm-launch-plugin libsgx-enclave-common libsgx-enclave-common-dbgsym libsgx-enclave-common-dev sgx-aesm-service libsgx-ae-epid                      libsgx-aesm-quote-ex-plugin-dbgsym  libsgx-launch-dbgsym              libsgx-ae-le                        libsgx-dcap-default-qpl             libsgx-launch-dev                 libsgx-ae-pce                       libsgx-dcap-default-qpl-dbgsym      libsgx-pce-logic                  libsgx-ae-qe3                       libsgx-dcap-default-qpl-dev         libsgx-pce-logic-dbgsym           libsgx-ae-qve                       libsgx-dcap-ql                      libsgx-qe3-logic                  libsgx-aesm-ecdsa-plugin            libsgx-dcap-ql-dbgsym               libsgx-qe3-logic-dbgsym           libsgx-aesm-ecdsa-plugin-dbgsym     libsgx-dcap-ql-dev                  libsgx-quote-ex                   libsgx-aesm-epid-plugin             libsgx-enclave-common               libsgx-quote-ex-dbgsym            libsgx-aesm-epid-plugin-dbgsym      libsgx-enclave-common-dbgsym        libsgx-quote-ex-dev               libsgx-aesm-launch-plugin           libsgx-enclave-common-dev           libsgx-uae-service                libsgx-aesm-launch-plugin-dbgsym    libsgx-epid                         libsgx-uae-service-dbgsym         libsgx-aesm-pce-plugin              libsgx-epid-dbgsym                  libsgx-urts                       libsgx-aesm-pce-plugin-dbgsym       libsgx-epid-dev                     libsgx-urts-dbgsym                libsgx-aesm-quote-ex-plugin         libsgx-launch             
++make deb_psw_pkg DEBUG=1
++make deb_local_repo DEBUG=1
++cat /etc/apt/sources.list
++sudo apt update
++sudo apt install -y libsgx-launch libsgx-urts libsgx-epid libsgx-ae-le libsgx-ae-epid libsgx-ae-pce libsgx-aesm-launch-plugin libsgx-enclave-common libsgx-enclave-common-dbgsym libsgx-enclave-common-dev sgx-aesm-service libsgx-ae-epid                      libsgx-aesm-quote-ex-plugin-dbgsym  libsgx-launch-dbgsym              libsgx-ae-le                        libsgx-dcap-default-qpl             libsgx-launch-dev                 libsgx-ae-pce                       libsgx-dcap-default-qpl-dbgsym      libsgx-pce-logic                  libsgx-ae-qe3                       libsgx-dcap-default-qpl-dev         libsgx-pce-logic-dbgsym           libsgx-ae-qve                       libsgx-dcap-ql                      libsgx-qe3-logic                  libsgx-aesm-ecdsa-plugin            libsgx-dcap-ql-dbgsym               libsgx-qe3-logic-dbgsym           libsgx-aesm-ecdsa-plugin-dbgsym     libsgx-dcap-ql-dev                  libsgx-quote-ex                   libsgx-aesm-epid-plugin             libsgx-enclave-common               libsgx-quote-ex-dbgsym            libsgx-aesm-epid-plugin-dbgsym      libsgx-enclave-common-dbgsym        libsgx-quote-ex-dev               libsgx-aesm-launch-plugin           libsgx-enclave-common-dev           libsgx-uae-service                libsgx-aesm-launch-plugin-dbgsym    libsgx-epid                         libsgx-uae-service-dbgsym         libsgx-aesm-pce-plugin              libsgx-epid-dbgsym                  libsgx-urts                       libsgx-aesm-pce-plugin-dbgsym       libsgx-epid-dev                     libsgx-urts-dbgsym                libsgx-aesm-quote-ex-plugin         libsgx-launch             
+diff --git a/make_psw_release.sh b/make_psw_release.sh
+new file mode 100755
+index 00000000..cfe3bc86
+--- /dev/null
++++ b/make_psw_release.sh
+@@ -0,0 +1,8 @@
++#!/bin/bash
++sudo /opt/intel/sgx-aesm-service/cleanup.sh
++sudo apt remove -y libsgx-launch libsgx-urts libsgx-epid libsgx-ae-le libsgx-ae-epid libsgx-ae-pce libsgx-aesm-launch-plugin libsgx-enclave-common libsgx-enclave-common-dbgsym libsgx-enclave-common-dev sgx-aesm-service libsgx-ae-epid                      libsgx-aesm-quote-ex-plugin-dbgsym  libsgx-launch-dbgsym              libsgx-ae-le                        libsgx-dcap-default-qpl             libsgx-launch-dev                 libsgx-ae-pce                       libsgx-dcap-default-qpl-dbgsym      libsgx-pce-logic                  libsgx-ae-qe3                       libsgx-dcap-default-qpl-dev         libsgx-pce-logic-dbgsym           libsgx-ae-qve                       libsgx-dcap-ql                      libsgx-qe3-logic                  libsgx-aesm-ecdsa-plugin            libsgx-dcap-ql-dbgsym               libsgx-qe3-logic-dbgsym           libsgx-aesm-ecdsa-plugin-dbgsym     libsgx-dcap-ql-dev                  libsgx-quote-ex                   libsgx-aesm-epid-plugin             libsgx-enclave-common               libsgx-quote-ex-dbgsym            libsgx-aesm-epid-plugin-dbgsym      libsgx-enclave-common-dbgsym        libsgx-quote-ex-dev               libsgx-aesm-launch-plugin           libsgx-enclave-common-dev           libsgx-uae-service                libsgx-aesm-launch-plugin-dbgsym    libsgx-epid                         libsgx-uae-service-dbgsym         libsgx-aesm-pce-plugin              libsgx-epid-dbgsym                  libsgx-urts                       libsgx-aesm-pce-plugin-dbgsym       libsgx-epid-dev                     libsgx-urts-dbgsym                libsgx-aesm-quote-ex-plugin         libsgx-launch             
++make deb_psw_pkg
++make deb_local_repo
++cat /etc/apt/sources.list
++sudo apt update
++sudo apt install -y libsgx-launch libsgx-urts libsgx-epid libsgx-ae-le libsgx-ae-epid libsgx-ae-pce libsgx-aesm-launch-plugin libsgx-enclave-common libsgx-enclave-common-dbgsym libsgx-enclave-common-dev sgx-aesm-service libsgx-ae-epid                      libsgx-aesm-quote-ex-plugin-dbgsym  libsgx-launch-dbgsym              libsgx-ae-le                        libsgx-dcap-default-qpl             libsgx-launch-dev                 libsgx-ae-pce                       libsgx-dcap-default-qpl-dbgsym      libsgx-pce-logic                  libsgx-ae-qe3                       libsgx-dcap-default-qpl-dev         libsgx-pce-logic-dbgsym           libsgx-ae-qve                       libsgx-dcap-ql                      libsgx-qe3-logic                  libsgx-aesm-ecdsa-plugin            libsgx-dcap-ql-dbgsym               libsgx-qe3-logic-dbgsym           libsgx-aesm-ecdsa-plugin-dbgsym     libsgx-dcap-ql-dev                  libsgx-quote-ex                   libsgx-aesm-epid-plugin             libsgx-enclave-common               libsgx-quote-ex-dbgsym            libsgx-aesm-epid-plugin-dbgsym      libsgx-enclave-common-dbgsym        libsgx-quote-ex-dev               libsgx-aesm-launch-plugin           libsgx-enclave-common-dev           libsgx-uae-service                libsgx-aesm-launch-plugin-dbgsym    libsgx-epid                         libsgx-uae-service-dbgsym         libsgx-aesm-pce-plugin              libsgx-epid-dbgsym                  libsgx-urts                       libsgx-aesm-pce-plugin-dbgsym       libsgx-epid-dev                     libsgx-urts-dbgsym                libsgx-aesm-quote-ex-plugin         libsgx-launch             
+diff --git a/make_sdk_debug.sh b/make_sdk_debug.sh
+new file mode 100755
+index 00000000..63605a1c
+--- /dev/null
++++ b/make_sdk_debug.sh
+@@ -0,0 +1,4 @@
++#!/bin/bash
++make sdk_install_pkg_no_mitigation DEBUG=1
++sudo /opt/intel/sgxsdk/uninstall.sh
++printf 'no\n/opt/intel\n' | sudo linux/installer/bin/sgx_linux_x64_sdk_2.10.100.2.bin
+\ No newline at end of file
+diff --git a/make_sdk_release.sh b/make_sdk_release.sh
+new file mode 100755
+index 00000000..1ffaf3b2
+--- /dev/null
++++ b/make_sdk_release.sh
+@@ -0,0 +1,4 @@
++#!/bin/bash
++make sdk_install_pkg_no_mitigation
++sudo /opt/intel/sgxsdk/uninstall.sh
++printf 'no\n/opt/intel\n' | sudo linux/installer/bin/sgx_linux_x64_sdk_2.10.100.2.bin
+\ No newline at end of file
+diff --git a/sdk/Makefile.source b/sdk/Makefile.source
+index c0e682ae..4565e63c 100644
+--- a/sdk/Makefile.source
++++ b/sdk/Makefile.source
+@@ -72,7 +72,7 @@ components: tstdc tcxx tservice trts tcrypto tkey_exchange ukey_exchange tprotec
+ tstdc: $(LIBTLIBC)
+ 
+ $(LIBTLIBC): tlibthread compiler-rt tsafecrt tsetjmp tmm_rsrv
+-	$(MAKE) -C tlibc/ -j4 2> /dev/null
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C tlibc/ -j4 2> /dev/null
+ 	@$(MKDIR) $(BUILD_DIR)/.tlibc   $(BUILD_DIR)/.tlibthread $(BUILD_DIR)/.tsafecrt $(BUILD_DIR)/.tsetjmp $(BUILD_DIR)/.tmm_rsrv
+ 	@$(RM) -f $(BUILD_DIR)/.tlibc/*         && cd $(BUILD_DIR)/.tlibc      && $(AR) x $(LINUX_SDK_DIR)/tlibc/libtlibc.a
+ 	@$(RM) -f $(BUILD_DIR)/.tlibthread/*    && cd $(BUILD_DIR)/.tlibthread && $(AR) x $(LINUX_SDK_DIR)/tlibthread/libtlibthread.a
+@@ -91,23 +91,23 @@ $(LIBTLIBC): tlibthread compiler-rt tsafecrt tsetjmp tmm_rsrv
+ 
+ .PHONY: tlibthread
+ tlibthread:
+-	$(MAKE) -C tlibthread/
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C tlibthread/
+ 
+ .PHONY: tsafecrt
+ tsafecrt:
+-	$(MAKE) -C tsafecrt/
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C tsafecrt/
+ 
+ .PHONY: compiler-rt
+ compiler-rt:
+-	$(MAKE) -C compiler-rt/ 2> /dev/null
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C compiler-rt/ 2> /dev/null
+ 
+ .PHONY: tsetjmp
+ tsetjmp:
+-	$(MAKE) -C tsetjmp/
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C tsetjmp/
+ 
+ .PHONY: tmm_rsrv
+ tmm_rsrv:
+-	$(MAKE) -C tmm_rsrv/
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C tmm_rsrv/
+ 
+ # ---------------------------------------------------
+ #  pthread
+@@ -134,11 +134,11 @@ $(LIBTCXX): cpprt tlibcxx
+ 
+ .PHONY: cpprt
+ cpprt:
+-	$(MAKE) -C cpprt
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C cpprt
+ 
+ .PHONY: tlibcxx
+-tlibcxx: $(BUILD_DIR)
+-	$(MAKE) -C tlibcxx/ 2> /dev/null
++tlibcxx: $(BUILD_DIR)	
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C tlibcxx/ 2> /dev/null
+ 	$(CP) tlibcxx/README.sgx $(BUILD_DIR)/libc++_Changes_SGX.txt
+ 
+ # ---------------------------------------------------
+@@ -159,46 +159,46 @@ $(LIBTSE): selib tseal ec_dh_lib
+ 
+ .PHONY: selib
+ selib:
+-	$(MAKE) -C selib/linux/
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C selib/linux/
+ 
+ .PHONY: tseal
+ tseal:
+-	$(MAKE) -C tseal/linux/
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C tseal/linux/
+ 
+ .PHONY: ec_dh_lib
+ ec_dh_lib:
+-	$(MAKE) -C ec_dh_lib/
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C ec_dh_lib/
+ 
+ # ---------------------------------------------------
+ #  Other trusted libraries
+ # ---------------------------------------------------
+ .PHONY: trts
+ trts:
+-	$(MAKE) -C trts/
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C trts/
+ 
+ .PHONY: tcrypto
+ tcrypto: edger8r
+-	$(MAKE) -C tlibcrypto/
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C tlibcrypto/
+ 
+ .PHONY: tkey_exchange
+ tkey_exchange: edger8r
+-	$(MAKE) -C tkey_exchange
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C tkey_exchange
+ 
+ .PHONY: tcmalloc
+ tcmalloc:
+-	$(MAKE) -C gperftools/
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C gperftools/
+ 
+ .PHONY: tprotected_fs
+ tprotected_fs: edger8r
+-	$(MAKE) -C protected_fs/sgx_tprotected_fs
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C protected_fs/sgx_tprotected_fs
+ 
+ .PHONY: sgx_pcl
+ sgx_pcl:
+-	$(MAKE) -C protected_code_loader
++	$(MAKE) CC=$(TR_CC) CXX=$(TR_CXX) -C protected_code_loader
+ 
+ .PHONY: openmp
+ openmp:
+-	$(MAKE) -C $(LINUX_EXTERNAL_DIR)/openmp
++	$(MAKE) CC=$(gcc) CXX=$(g++) -C $(LINUX_EXTERNAL_DIR)/openmp
+ # ---------------------------------------------------
+ #  Untrusted libraries
+ # ---------------------------------------------------
+diff --git a/sdk/cpprt/Makefile b/sdk/cpprt/Makefile
+index 835fa03b..8e407d4f 100644
+--- a/sdk/cpprt/Makefile
++++ b/sdk/cpprt/Makefile
+@@ -82,7 +82,7 @@ $(CPPRT): $(OBJS) prepare-libunwind libunwind
+ .PHONY: libunwind
+ libunwind:
+ 	cd $(LIBUNWIND_DIR)/ && \
+-		( test -f Makefile || CFLAGS="$(CFLAGS)" ./autogen.sh ) && \
++		( test -f Makefile || CFLAGS="$(CFLAGS)" CC=$(CC) CXX=$(CXX) ./autogen.sh ) && \
+ 		$(MAKE) -j5
+ 
+ 
+diff --git a/sdk/cpprt/linux/libunwind/include/libunwind_i.h b/sdk/cpprt/linux/libunwind/include/libunwind_i.h
+index ea983b82..3fa04205 100644
+--- a/sdk/cpprt/linux/libunwind/include/libunwind_i.h
++++ b/sdk/cpprt/linux/libunwind/include/libunwind_i.h
+@@ -54,6 +54,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.  */
+ #include <signal.h>
+ #endif
+ 
++#undef MB_LEN_MAX
+ #include <stdlib.h>
+ #include <string.h>
+ #include <unistd.h>
+diff --git a/sdk/ec_dh_lib/Makefile b/sdk/ec_dh_lib/Makefile
+index ad0841e9..c4d79ba1 100644
+--- a/sdk/ec_dh_lib/Makefile
++++ b/sdk/ec_dh_lib/Makefile
+@@ -32,8 +32,6 @@
+ TOP_DIR  := ../..
+ include $(TOP_DIR)/buildenv.mk
+ 
+-CXXFLAGS += -Werror
+-
+ INCLUDE += -I$(COMMON_DIR)/inc/tlibc                          \
+            -I$(COMMON_DIR)/inc/internal                       \
+            -I$(COMMON_DIR)/inc                                \
+diff --git a/sdk/gperftools/Makefile b/sdk/gperftools/Makefile
+index 6d91aabc..edc0c27d 100644
+--- a/sdk/gperftools/Makefile
++++ b/sdk/gperftools/Makefile
+@@ -50,6 +50,8 @@ libtcmalloc:
+ 		( test -f Makefile || \
+ 			CFLAGS="$(CFLAGS)" \
+ 			CXXFLAGS="$(CXXFLAGS)" \
++			CC="$(CC)" \
++			CXX="$(CXX)" \
+ 			ENCLAVE_CFLAGS="$(ENCLAVE_CFLAGS)" \
+ 			ENCLAVE_CXXFLAGS="$(ENCLAVE_CXXFLAGS)" ./autogen.sh $(DEBUG_FLAG) ) \
+ 		&& $(MAKE)
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/Makefile b/sdk/protected_fs/sgx_tprotected_fs/Makefile
+index 528c415a..8e2c0376 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/Makefile
++++ b/sdk/protected_fs/sgx_tprotected_fs/Makefile
+@@ -39,7 +39,7 @@ INCLUDE += -I. \
+ 
+ INCLUDE += -I$(LINUX_SDK_DIR)/tlibcxx/include
+ 
+-CXXFLAGS += $(ENCLAVE_CXXFLAGS) -U__STRICT_ANSI__ -Werror
++CXXFLAGS += $(ENCLAVE_CXXFLAGS) -U__STRICT_ANSI__
+ #CXXFLAGS += -Wno-unused-local-typedefs -Wno-shadow -Wno-missing-field-initializers -Wno-unused-parameter
+ 
+ SRC := $(wildcard *.cpp)
+diff --git a/sdk/sample_libcrypto/Makefile b/sdk/sample_libcrypto/Makefile
+index 30260c6c..66259eda 100644
+--- a/sdk/sample_libcrypto/Makefile
++++ b/sdk/sample_libcrypto/Makefile
+@@ -33,12 +33,12 @@
+ include ../../buildenv.mk
+ 
+ 
+-CXXFLAGS += -Werror -fno-rtti -fno-exceptions -fPIC
++CXXFLAGS += -fno-rtti -fno-exceptions -fPIC
+ 
+ CPPFLAGS := -isystem $(SGX_IPP_INC) \
+             -I$(COMMON_DIR)/inc/internal/           
+ 
+-CFLAGS +=  -fPIC -Werror -fno-exceptions -I$(SGX_IPP_INC)
++CFLAGS +=  -fPIC -fno-exceptions -I$(SGX_IPP_INC)
+ 
+ IPPLIB_DIR = $(SGX_IPP_DIR)/lib/linux/intel64/no_mitigation
+ 
+diff --git a/sdk/selib/linux/Makefile b/sdk/selib/linux/Makefile
+index 9029d250..a9e12ee9 100644
+--- a/sdk/selib/linux/Makefile
++++ b/sdk/selib/linux/Makefile
+@@ -31,7 +31,7 @@
+ 
+ include ../../../buildenv.mk
+ 
+-CXXFLAGS += $(ENCLAVE_CXXFLAGS) -Werror -fno-rtti -fno-exceptions
++CXXFLAGS += $(ENCLAVE_CXXFLAGS) -fno-rtti -fno-exceptions
+ 
+ CPPLAGS += -I$(COMMON_DIR)/inc/              \
+            -I$(COMMON_DIR)/inc/internal/     \
+diff --git a/sdk/tkey_exchange/Makefile b/sdk/tkey_exchange/Makefile
+index 4fbeedef..7be0f3cd 100644
+--- a/sdk/tkey_exchange/Makefile
++++ b/sdk/tkey_exchange/Makefile
+@@ -32,7 +32,6 @@
+ TOP_DIR  = ../..
+ include $(TOP_DIR)/buildenv.mk
+ 
+-CXXFLAGS += -Werror
+ 
+ INCLUDE += -I$(COMMON_DIR)/inc/tlibc    \
+            -I$(COMMON_DIR)/inc/internal \
+diff --git a/sdk/tlibc/Makefile b/sdk/tlibc/Makefile
+index 130f746f..879df798 100644
+--- a/sdk/tlibc/Makefile
++++ b/sdk/tlibc/Makefile
+@@ -33,8 +33,8 @@ include ../../buildenv.mk
+ 
+ CFLAGS   += $(ENCLAVE_CFLAGS) -D_TLIBC_GNU_
+ ASFLAGS  := $(CFLAGS)
+-CFLAGS   += -std=c99
+-CXXFLAGS += $(ENCLAVE_CXXFLAGS) -fno-exceptions -fno-rtti
++CFLAGS   += -std=c99 -fno-builtin
++CXXFLAGS += $(ENCLAVE_CXXFLAGS) -fno-exceptions -fno-rtti -fno-builtin
+ 
+ CPPFLAGS += -I.                          \
+             -I$(COMMON_DIR)/inc          \
+diff --git a/sdk/tlibc/gen/spinlock.c b/sdk/tlibc/gen/spinlock.c
+index ab06f735..caebf358 100644
+--- a/sdk/tlibc/gen/spinlock.c
++++ b/sdk/tlibc/gen/spinlock.c
+@@ -30,18 +30,21 @@
+  */
+ 
+ #include <sgx_spinlock.h>
+-
++#ifndef __clang__
+ static inline void _mm_pause(void) __attribute__((always_inline));
++#endif
+ static inline int _InterlockedExchange(int volatile * dst, int val) __attribute__((always_inline));
+ 
++#ifndef __clang__
+ static inline void _mm_pause(void)  /* definition requires -ffreestanding */
+ {
+     __asm __volatile(
+         "pause"
+     );
+ }
++#endif
+ 
+-static inline int _InterlockedExchange(int volatile * dst, int val)
++int _InterlockedExchange(int volatile * dst, int val)
+ {
+     int res;
+ 
+diff --git a/sdk/tlibc/math/e_powl.c b/sdk/tlibc/math/e_powl.c
+index 6e956811..7f5cd485 100644
+--- a/sdk/tlibc/math/e_powl.c
++++ b/sdk/tlibc/math/e_powl.c
+@@ -464,7 +464,7 @@ if( nflg )
+ 
+ return( z );
+ }
+-DEF_STD(powl);
++//DEF_STD(powl);
+ 
+ 
+ /* Find a multiple of 1/NXT that is within 1/NXT of x. */
+diff --git a/sdk/tlibc/string/strchr.c b/sdk/tlibc/string/strchr.c
+index 8fea709a..59a77a14 100644
+--- a/sdk/tlibc/string/strchr.c
++++ b/sdk/tlibc/string/strchr.c
+@@ -30,6 +30,11 @@
+ 
+ #include <string.h>
+ 
++
++#define __weak_alias(alias,sym)				\
++	__asm__(".weak " __STRING(alias) " ; "		\
++	    __STRING(alias) " = " __STRING(sym))
++
+ __weak_alias(index, strchr);
+ 
+ #ifdef _TLIBC_USE_INTEL_FAST_STRING_
+diff --git a/sdk/tlibc/string/strrchr.c b/sdk/tlibc/string/strrchr.c
+index 74767eb8..b7aead28 100644
+--- a/sdk/tlibc/string/strrchr.c
++++ b/sdk/tlibc/string/strrchr.c
+@@ -36,6 +36,10 @@
+ extern char *_intel_fast_strrchr(const char *, int);
+ #endif
+ 
++#define __weak_alias(alias,sym)				\
++	__asm__(".weak " __STRING(alias) " ; "		\
++	    __STRING(alias) " = " __STRING(sym))
++
+ __weak_alias(rindex, strrchr);
+ 
+ char *
+diff --git a/sdk/tlibcrypto/Makefile b/sdk/tlibcrypto/Makefile
+index 08c72fc9..cad27afd 100644
+--- a/sdk/tlibcrypto/Makefile
++++ b/sdk/tlibcrypto/Makefile
+@@ -36,7 +36,7 @@ CPPFLAGS := -I$(COMMON_DIR)/inc/internal \
+             -I$(COMMON_DIR)/inc/tlibc    \
+ 	    -I$(SGX_IPP_INC)
+ 
+-CXXFLAGS += $(ENCLAVE_CXXFLAGS) -Werror -fno-exceptions -fno-rtti
++CXXFLAGS += $(ENCLAVE_CXXFLAGS) -fno-exceptions -fno-rtti
+ 
+ OBJ = init_tcrypto_lib.o sgx_aes_ctr.o sgx_rsa_encryption.o sgx_aes_gcm.o sgx_cmac128.o sgx_hmac.o sgx_ecc256.o sgx_ecc256_ecdsa.o sgx_sha256.o sgx_sha1.o sgx_sha256_msg.o sgx_ecc256_internal.o sgx_rsa3072.o sgx_internal.o
+ SHARED_OBJ = tcrypto_version.o sgx_common_init_ipp.o
+diff --git a/sdk/tlibthread/Makefile b/sdk/tlibthread/Makefile
+index 8fbc206d..8464cbbb 100755
+--- a/sdk/tlibthread/Makefile
++++ b/sdk/tlibthread/Makefile
+@@ -30,8 +30,11 @@
+ #
+ 
+ include ../../buildenv.mk
+-
++ifeq ($(CXX), clang++)
++CXXFLAGS += -Qunused-arguments $(ENCLAVE_CXXFLAGS) -Werror -fno-exceptions -fno-rtti
++else	
+ CXXFLAGS += $(ENCLAVE_CXXFLAGS) -Werror -fno-exceptions -fno-rtti
++endif
+ 
+ CPPFLAGS := -I$(COMMON_DIR)/inc/internal \
+             -I$(COMMON_DIR)/inc          \
+diff --git a/sdk/trts/Makefile b/sdk/trts/Makefile
+index e56b1277..20172a83 100644
+--- a/sdk/trts/Makefile
++++ b/sdk/trts/Makefile
+@@ -38,7 +38,6 @@ CPPFLAGS += -I$(COMMON_DIR)/inc          \
+             -I$(LINUX_SDK_DIR)/pthread
+ 
+ CXXFLAGS += $(ENCLAVE_CXXFLAGS) \
+-            -Werror         \
+             -fno-exceptions \
+             -fno-rtti
+ 
+diff --git a/sdk/tseal/linux/Makefile b/sdk/tseal/linux/Makefile
+index a97a67c2..3b285bf8 100644
+--- a/sdk/tseal/linux/Makefile
++++ b/sdk/tseal/linux/Makefile
+@@ -31,7 +31,7 @@
+ 
+ include ../../../buildenv.mk
+ 
+-CXXFLAGS += $(ENCLAVE_CXXFLAGS) -Werror -fno-rtti -fno-exceptions
++CXXFLAGS += $(ENCLAVE_CXXFLAGS) -fno-rtti -fno-exceptions
+ 
+ CPPFLAGS := -I$(COMMON_DIR)/inc/                    \
+             -I$(COMMON_DIR)/inc/internal/           \

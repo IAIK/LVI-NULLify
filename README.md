@@ -40,7 +40,12 @@ We advise to completely remove all SDK and PSW installations from the system bef
 If you have previously installed a version of SGX that uses local packages, you may uninstall sdk and psw with  
 `./uninstall_psw_sdk.sh`
 
-Please install all prerequisites for your system according to https://github.com/intel/linux-sgx/blob/master/README.md .
+**Please install all prerequisites for your system according to https://github.com/intel/linux-sgx/blob/master/README.md .**
+For Ubuntu 18.04, these are:  
+`sudo apt-get install build-essential ocaml ocamlbuild automake autoconf libtool wget python libssl-dev git cmake perl`
+For Ubuntu 20.01:  
+`sudo apt-get install build-essential ocaml ocamlbuild automake autoconf libtool wget python-is-python3 libssl-dev git cmake perl`  
+Please see the Intel page for other operating systems.
 
 ## 4.1 Install unpatched SDK
 

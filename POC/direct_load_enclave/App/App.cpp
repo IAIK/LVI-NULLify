@@ -222,6 +222,8 @@ int SGX_CDECL main(int argc, char *argv[])
   /* Destroy the enclave */
   sgx_destroy_enclave(global_eid);
 
+  printf("\n\n\n\n");
+
   printf("Info: Enclave successfully returned.\n");
   return 0;
 }

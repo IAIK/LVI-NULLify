@@ -11,6 +11,9 @@ to download and patch the two benchmarks.
 This step will compile the Intel SDK once for the all mitigation options you want to try.
 Then, it will compile both benchmarks with the mitigations and the corresponding SDKs.
 
+Aside from `cmake`, the SYMPHONY library is a prerequisite for the Intel's mitigation, it can be installed with  
+`apt install coinor-libsymphony-dev`
+
 Two scripts are of note here:  
 `./scripts/benchmarks_build.sh` and  
 `./scripts/benchmarks_update_template.sh` 

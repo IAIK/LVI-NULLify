@@ -10,9 +10,12 @@ The modified compiler, PSW, SDK and the relocator comprise LVINullify, which all
 The total install time should be around 1h-2h.
 
 # 1 Compiler
-To build the compiler for LVI-NULLify, install the prerequisites for llvm (e.g. cmake and ninja-build) and run  
+To build the compiler for LVI-NULLify, install the prerequisites for llvm (e.g. cmake and ninja-build) and the symphony library  
+`apt install coinor-libsymphony-dev`  
+and run  
 `./build.sh` 
 inside the `compiler` folder.
+
 
 If the build fails or hangs (e.g. not enough ram), you can try to restart with `ninja clang` in the `llvm11/build` directory.
 

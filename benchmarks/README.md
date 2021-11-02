@@ -54,6 +54,8 @@ To get the data and figures in the paper from the generated `result_` directorie
 `./scripts/benchmarks_to_csv_nbench.sh` or  
 `./scripts/benchmarks_to_csv_sgxbench.sh`  
 
+These scripts *require NUMPY*, `sudo apt-get install python3-numpy`.
+
 Now, apply our high-tech conversion method of opening the csv files (`results.csv`) in the results directory and copy/paste the data into the aptly named `hightech_nbench_plotting.ods` or `hightech_sgxbench_formatting.ods`, which you can do in OpenOffice, LibreOffice or Excel.  
 For nbench, make sure to copy the clang result to the appropriate line, as it is the reference for the others.
 

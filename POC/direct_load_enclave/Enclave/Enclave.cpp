@@ -99,7 +99,7 @@ void ecall_do_something(char* oracle) {
     //0 gets transiently injected into the load of secret_add here, making the addend 0
     //LVI-Nullyify does NOT prevent this, manually add the lfence instruction to prevent an attack like this
     uint8_t sum = *secret_add+secret;
-    //asm volatile("lfence");
+    //asm volatile("lfence" : : : "memory");
     volatile char t = oracle[sum<<12];
 
     //attacker processing
